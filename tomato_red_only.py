@@ -7,7 +7,7 @@ from datetime import datetime
 
 # --- Cấu hình Logging ---
 logging.basicConfig(
-    level=logging.INFO,  # Mặc định INFO, đổi thành DEBUG để xem chi tiết hơn
+    level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
@@ -15,31 +15,27 @@ logging.basicConfig(
     ]
 )
 
-# --- Cấu hình UART (Bỏ hoặc comment lại nếu không dùng) ---
-USE_UART = False  # Đặt True nếu muốn dùng UART
-UART_PORT = '/dev/ttyUSB0'
+# --- Cấu hình UART ---
+USE_UART = True  # Đặt True nếu muốn dùng UART
+UART_PORT = '/dev/ttyUSB0'  # Thay đổi nếu cần
 UART_BAUDRATE = 115200
 UART_TIMEOUT = 1
-ser_instance_global = None  # Biến global cho UART
+ser_instance_global = None
 
 # --- Cấu hình Màu sắc và Xử lý Ảnh ---
-# Ngưỡng HSV ban đầu cho MÀU ĐỎ
 LOWER_RED_HSV1 = np.array((0, 100, 80))
 UPPER_RED_HSV1 = np.array((10, 255, 255))
 LOWER_RED_HSV2 = np.array((160, 100, 80))
 UPPER_RED_HSV2 = np.array((180, 255, 255))
 
-# Ngưỡng HSV ban đầu cho MÀU VÀNG (TARGET_COLOR)
-LOWER_TARGET_COLOR_HSV = np.array((18, 50, 80))
+LOWER_TARGET_COLOR_HSV = np.array((18, 50, 80))  # Target color (xanh/vàng)
 UPPER_TARGET_COLOR_HSV = np.array((38, 255, 255))
 
-# Thông số xử lý hình thái học
 MEDIAN_BLUR_KERNEL_SIZE = 5
 OPENING_KERNEL_SIZE = 5
 OPENING_ITERATIONS = 1
-DILATE_ITERATIONS_AFTER_OPENING = 5  # Giảm bớt
+DILATE_ITERATIONS_AFTER_OPENING = 5
 
-# Ngưỡng lọc contour theo hình dạng
 MIN_CONTOUR_AREA = 800
 MIN_SOLIDITY = 0.70
 MIN_ASPECT_RATIO = 0.55
@@ -49,7 +45,6 @@ MIN_CIRCULARITY_RELAXED = 0.60
 
 ENABLE_POST_FILTER_COLOR_CLASSIFICATION = True
 
-# Ngưỡng phân loại màu chi tiết cho MÀU ĐỎ
 CLASSIFY_RED_MIN_HUE1 = 0
 CLASSIFY_RED_MAX_HUE1 = 12
 CLASSIFY_RED_MIN_HUE2 = 158
@@ -57,7 +52,6 @@ CLASSIFY_RED_MAX_HUE2 = 180
 CLASSIFY_RED_MIN_SATURATION = 80
 CLASSIFY_RED_MIN_VALUE = 70
 
-# Ngưỡng phân loại màu chi tiết cho MÀU VÀNG (TARGET_COLOR)
 CLASSIFY_TARGET_MIN_HUE = 18
 CLASSIFY_TARGET_MAX_HUE = 40
 CLASSIFY_TARGET_MIN_SATURATION = 50
@@ -66,9 +60,8 @@ CLASSIFY_TARGET_MIN_VALUE = 80
 DOMINANT_PIXEL_RATIO_THRESHOLD = 0.40
 SIGNIFICANT_PIXEL_RATIO_THRESHOLD = 0.25
 
-# Cấu hình hiển thị (CHỈ GIỮ LẠI ẢNH KẾT QUẢ CUỐI CÙNG)
-SHOW_FINAL_RESULT_IMAGE_ONLY = True  # Nếu True, chỉ hiện ảnh cuối
-ONLY_DETECT_LARGEST_CONTOUR = True
+SHOW_FINAL_RESULT_IMAGE_ONLY = True
+ONLY_DETECT_LARGEST_CONTOUR = True  # Nếu True, chỉ gửi thông tin của 1 quả (lớn nhất)
 
 
 def init_uart_if_needed():
@@ -89,16 +82,27 @@ def init_uart_if_needed():
 
 def send_object_data_uart(color_code, center_x, center_y, radius):
     global ser_instance_global
-    if USE_UART and ser_instance_global and ser_instance_global.is_open:
+    if not USE_UART: return
+
+    if ser_instance_global and ser_instance_global.is_open:
         data = f"{color_code},{center_x},{center_y},{radius}\n"
         try:
             ser_instance_global.write(data.encode())
-            logging.debug(f"Sent UART: {data.strip()}")
+            if color_code == 0 and center_x == 0 and center_y == 0 and radius == 0:
+                logging.debug(f"Sent UART (No Detection): {data.strip()}")
+            else:
+                logging.info(f"Sent UART (Detection): {data.strip()}")
         except serial.SerialException as e:
             logging.error(f"Lỗi gửi UART: {e}")
+    else:
+        if not ser_instance_global:
+            logging.warning("UART send: ser_instance_global is None.")
+        elif not ser_instance_global.is_open:
+            logging.warning("UART send: ser_instance_global is not open.")
 
 
 def get_dominant_color_in_roi(hsv_image_roi, original_mask_roi):
+    # ... (Nội dung hàm này giữ nguyên như phiên bản trước, không cần thay đổi cho yêu cầu này)
     total_pixels_in_contour = cv2.countNonZero(original_mask_roi)
     if total_pixels_in_contour == 0: return "unknown", 0, 0, 0
 
@@ -136,13 +140,13 @@ def get_dominant_color_in_roi(hsv_image_roi, original_mask_roi):
 
     if is_red_by_mean and red_ratio >= DOMINANT_PIXEL_RATIO_THRESHOLD:
         if is_target_by_mean and target_ratio >= SIGNIFICANT_PIXEL_RATIO_THRESHOLD and red_ratio <= target_ratio * 1.5:
-            pass  # Bị lẫn, sẽ đi xuống
+            pass
         else:
             logging.debug("    Decision: Red (dominant)")
             return "red", hue_roi, saturation_roi, value_roi
     if is_target_by_mean and target_ratio >= DOMINANT_PIXEL_RATIO_THRESHOLD:
         if is_red_by_mean and red_ratio >= SIGNIFICANT_PIXEL_RATIO_THRESHOLD and target_ratio <= red_ratio * 1.5:
-            pass  # Bị lẫn
+            pass
         else:
             logging.debug("    Decision: Target Color (dominant)")
             return "target_color", hue_roi, saturation_roi, value_roi
@@ -152,7 +156,7 @@ def get_dominant_color_in_roi(hsv_image_roi, original_mask_roi):
     if is_target_by_mean and not is_red_by_mean and target_ratio >= SIGNIFICANT_PIXEL_RATIO_THRESHOLD:
         logging.debug("    Decision: Target Color (significant, no red mean)")
         return "target_color", hue_roi, saturation_roi, value_roi
-    if is_red_by_mean and red_ratio >= SIGNIFICANT_PIXEL_RATIO_THRESHOLD:  # Ưu tiên đỏ nếu có dấu hiệu
+    if is_red_by_mean and red_ratio >= SIGNIFICANT_PIXEL_RATIO_THRESHOLD:
         if is_target_by_mean and target_ratio > red_ratio * 0.8:
             logging.debug("    Decision: Unknown (ambiguous fallback)")
             return "unknown", hue_roi, saturation_roi, value_roi
@@ -189,10 +193,10 @@ def process_video_frame(frame):
     valid_contours_data = []
 
     if contours:
+        # ... (Lọc contour theo hình dạng giữ nguyên) ...
         for i, cnt in enumerate(contours):
             area = cv2.contourArea(cnt)
             if area < MIN_CONTOUR_AREA: continue
-
             x_b, y_b, w_b, h_b = cv2.boundingRect(cnt)
             if w_b == 0 or h_b == 0: continue
             aspect_ratio = float(w_b) / h_b
@@ -209,7 +213,6 @@ def process_video_frame(frame):
             if circularity < MIN_CIRCULARITY_RELAXED: continue
 
             logging.debug(f"Contour {i} PASSED SHAPE. Area:{area:.0f}, AR:{aspect_ratio:.2f}")
-
             (x_mc, y_mc), radius_mc = cv2.minEnclosingCircle(cnt)
             center_2d_mc = (int(x_mc), int(y_mc))
             radius_px_mc = int(radius_mc)
@@ -237,39 +240,60 @@ def process_video_frame(frame):
             valid_contours_data.sort(key=lambda x: x['area'], reverse=True)
             if valid_contours_data: detected_objects_final.append(valid_contours_data[0])
         else:
+            # Nếu không chỉ detect lớn nhất, bạn có thể muốn gửi nhiều quả
+            # Hiện tại, logic gửi UART bên dưới chỉ gửi quả đầu tiên trong detected_objects_final
+            # nếu ONLY_DETECT_LARGEST_CONTOUR là False nhưng có nhiều quả.
             detected_objects_final = valid_contours_data
 
-        for data in detected_objects_final:
+        # Xử lý và gửi dữ liệu cho các đối tượng được phát hiện
+        for data in detected_objects_final:  # Sẽ chỉ có 1 phần tử nếu ONLY_DETECT_LARGEST_CONTOUR = True
             center_2d = data['center_2d']
             radius_px = data['radius_px']
             obj_type = data['type']
 
-            draw_color = (128, 128, 128)
+            draw_color = (128, 128, 128)  # Xám
+            color_code_to_send = 0  # Mặc định cho unknown hoặc generic
+
             if obj_type == "red":
-                draw_color = (0, 0, 255)
+                draw_color = (0, 0, 255)  # Đỏ
+                color_code_to_send = 2  # Quy ước: Đỏ là 2
             elif obj_type == "target_color":
-                draw_color = (0, 255, 255)
+                draw_color = (0, 255, 255)  # Vàng
+                color_code_to_send = 1  # Quy ước: Xanh/Vàng là 1
 
             cv2.circle(original_img_display, center_2d, radius_px, draw_color, 2)
-            cv2.circle(original_img_display, center_2d, 3, (255, 0, 0), -1)
-            info_text = f"{obj_type.replace('_', ' ').capitalize()} R:{radius_px}"
+            cv2.circle(original_img_display, center_2d, 3, (255, 0, 0), -1)  # Tâm màu xanh
+
+            display_name = "Unknown"
+            if obj_type == "red":
+                display_name = "Do (2)"
+            elif obj_type == "target_color":
+                display_name = "Xanh/Vang (1)"
+
+            info_text = f"{display_name} R:{radius_px}"
             cv2.putText(original_img_display, info_text,
                         (center_2d[0] - radius_px, center_2d[1] - radius_px - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, draw_color, 2)
 
+            # Gửi dữ liệu UART
             if USE_UART:
-                color_code = 1 if obj_type == "red" else 0
-                send_object_data_uart(color_code, center_2d[0], center_2d[1], radius_px)
-                logging.info(f"Detected: {obj_type}, Center: {center_2d}, Radius: {radius_px}. Sent to UART.")
+                send_object_data_uart(color_code_to_send, center_2d[0], center_2d[1], radius_px)
+                # Log này đã có trong send_object_data_uart nếu gửi thành công
+
+    # Nếu không có đối tượng nào trong detected_objects_final (sau khi đã lọc largest nếu có)
+    # và chúng ta cần gửi 0,0,0,0
+    if not detected_objects_final and USE_UART:
+        send_object_data_uart(0, 0, 0, 0)
+        # Log cho trường hợp không phát hiện đã có trong send_object_data_uart
 
     return detected_objects_final, original_img_display
 
 
 def run_camera_detection(camera_id=0, target_fps=10, max_retries=3):
-    global ser_instance_global
+    global ser_instance_global  # Sử dụng biến global
     retry_count = 0
 
-    if USE_UART: init_uart_if_needed()  # Khởi tạo UART một lần ở đầu
+    if USE_UART: init_uart_if_needed()
 
     while retry_count <= max_retries:
         cap = cv2.VideoCapture(camera_id)
@@ -285,7 +309,7 @@ def run_camera_detection(camera_id=0, target_fps=10, max_retries=3):
                 return
 
         logging.info(f"Bắt đầu nhận diện từ camera {camera_id}. Nhấn 'q' để thoát.")
-        frame_count = 0
+        frame_count_interval = 0  # Đếm frame cho mỗi khoảng thời gian tính FPS
         start_time_fps_calc = time.time()
         consecutive_read_errors = 0
         max_consecutive_read_errors = 30
@@ -303,18 +327,20 @@ def run_camera_detection(camera_id=0, target_fps=10, max_retries=3):
             consecutive_read_errors = 0
 
             try:
-                results, result_image = process_video_frame(frame)
+                results, result_image = process_video_frame(frame)  # results là detected_objects_final
 
                 if result_image is not None and SHOW_FINAL_RESULT_IMAGE_ONLY:
                     cv2.imshow("Object Detection", result_image)
 
-                frame_count += 1
-                if frame_count % (target_fps * 2) == 0:  # Tính FPS mỗi 2 giây
+                frame_count_interval += 1
+                # Tính FPS và log mỗi khoảng 2 giây (dựa trên target_fps)
+                if frame_count_interval >= target_fps * 2:
                     elapsed_time = time.time() - start_time_fps_calc
-                    current_fps_val = frame_count / elapsed_time if elapsed_time > 0 else 0
-                    logging.info(f"FPS (ước lượng): {current_fps_val:.1f} ({frame_count} frames / {elapsed_time:.2f}s)")
-                    # Reset để tính FPS cho khoảng thời gian tiếp theo
-                    frame_count = 0
+                    if elapsed_time > 0:
+                        current_fps_val = frame_count_interval / elapsed_time
+                        logging.info(
+                            f"FPS (ước lượng): {current_fps_val:.1f} ({frame_count_interval} frames / {elapsed_time:.2f}s)")
+                    frame_count_interval = 0  # Reset
                     start_time_fps_calc = time.time()
 
 
@@ -328,7 +354,7 @@ def run_camera_detection(camera_id=0, target_fps=10, max_retries=3):
                 if USE_UART and ser_instance_global and ser_instance_global.is_open: ser_instance_global.close()
                 cv2.destroyAllWindows()
                 return
-            elif key == ord('s') and result_image is not None:
+            elif key == ord('s') and result_image is not None:  # Giả sử result_image được trả về từ process_video_frame
                 fname = f"capture_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.png"
                 cv2.imwrite(fname, result_image)
                 logging.info(f"Đã lưu ảnh: {fname}")
