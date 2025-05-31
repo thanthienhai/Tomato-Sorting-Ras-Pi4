@@ -364,11 +364,12 @@ def detect_objects_contour_features(image_input):
     return detected_objects_final, original_img_display
 
 
-def process_video(video_source=0, use_uart=True):
+def process_video(video_source=0, use_uart=True, target_fps=30):
     """Xử lý video từ camera hoặc file video
     Args:
         video_source: 0 cho webcam, hoặc đường dẫn file video
         use_uart: True nếu muốn gửi dữ liệu qua UART
+        target_fps: FPS mục tiêu để xử lý video
     """
     ser = init_uart() if use_uart else None
     
@@ -389,26 +390,47 @@ def process_video(video_source=0, use_uart=True):
 
     frame_count = 0
     start_time = time.time()
-    logging.info("Bắt đầu xử lý video. Nhấn 'q' để thoát.")
+    last_frame_time = start_time
+    frame_interval = 1.0 / target_fps
+    logging.info(f"Bắt đầu xử lý video với target FPS: {target_fps}. Nhấn 'q' để thoát.")
     
     try:
         while True:
+            current_time = time.time()
+            elapsed_since_last_frame = current_time - last_frame_time
+            
+            # Kiểm soát FPS
+            if elapsed_since_last_frame < frame_interval:
+                time.sleep(frame_interval - elapsed_since_last_frame)
+                continue
+                
             ret, frame = cap.read()
             if not ret:
                 logging.warning("Không đọc được frame")
                 break
 
             frame_count += 1
-            current_time = time.time()
-            elapsed_time = current_time - start_time
+            last_frame_time = current_time
+            total_elapsed_time = current_time - start_time
             
             try:
                 results, result_image = detect_objects_contour_features(frame)
                 
                 if result_image is not None:
-                    fps_text = f"FPS: {frame_count/elapsed_time:.1f}"
+                    # Hiển thị thông tin FPS và số frame đã xử lý
+                    current_fps = frame_count / total_elapsed_time
+                    fps_text = f"FPS: {current_fps:.1f}"
+                    frame_text = f"Frame: {frame_count}"
                     cv2.putText(result_image, fps_text, (10, 30), 
                               cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                    cv2.putText(result_image, frame_text, (10, 70),
+                              cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                    
+                    # Hiển thị thời gian chạy
+                    runtime_text = f"Runtime: {total_elapsed_time:.1f}s"
+                    cv2.putText(result_image, runtime_text, (10, 110),
+                              cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                    
                     cv2.imshow("Tomato Detection", result_image)
                 
                 if results and use_uart:
@@ -417,8 +439,15 @@ def process_video(video_source=0, use_uart=True):
                         center_x, center_y = obj['center_2d']
                         radius = obj['radius_px']
                         
-                        logging.info(f"Phát hiện cà chua - Màu: {'Chín' if color_code == 1 else 'Xanh'}, "
-                                   f"Tâm: ({center_x}, {center_y}), Bán kính: {radius}px")
+                        # Log chi tiết hơn về đối tượng được phát hiện
+                        logging.info(
+                            f"Frame {frame_count} - Phát hiện cà chua:\n"
+                            f"  - Màu: {'Chín' if color_code == 1 else 'Xanh'}\n"
+                            f"  - Vị trí: ({center_x}, {center_y})\n"
+                            f"  - Bán kính: {radius}px\n"
+                            f"  - Khoảng cách: {obj['estimated_distance_m']:.2f}m\n"
+                            f"  - Offset Y: {obj['estimated_offset_y_m']:.2f}m"
+                        )
                         
                         send_tomato_data(ser, color_code, center_x, center_y, radius)
                 
@@ -426,16 +455,23 @@ def process_video(video_source=0, use_uart=True):
                 logging.error(f"Lỗi khi xử lý frame {frame_count}: {e}")
                 continue
             
-            if cv2.waitKey(1) & 0xFF == ord('q'):
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
                 logging.info("Người dùng yêu cầu thoát")
                 break
+            elif key == ord('s'):  # Thêm chức năng lưu ảnh
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"detection_{timestamp}.jpg"
+                cv2.imwrite(filename, result_image)
+                logging.info(f"Đã lưu ảnh: {filename}")
             
     except KeyboardInterrupt:
         logging.info("Chương trình bị ngắt bởi người dùng")
     except Exception as e:
         logging.error(f"Lỗi không mong muốn: {e}")
     finally:
-        logging.info(f"Kết thúc xử lý video. Đã xử lý {frame_count} frames trong {elapsed_time:.1f} giây")
+        logging.info(f"Kết thúc xử lý video. Đã xử lý {frame_count} frames trong {total_elapsed_time:.1f} giây")
+        logging.info(f"FPS trung bình: {frame_count/total_elapsed_time:.1f}")
         cap.release()
         cv2.destroyAllWindows()
         if ser and ser.is_open:
@@ -444,9 +480,9 @@ def process_video(video_source=0, use_uart=True):
 
 if __name__ == "__main__":
     try:
-        video_source = 0
+        video_source = 0  # 0 cho webcam, hoặc đường dẫn file video
         logging.info("Khởi động chương trình phát hiện cà chua")
-        process_video(video_source, use_uart=True)
+        process_video(video_source, use_uart=True, target_fps=30)  # Có thể điều chỉnh target_fps
     except Exception as e:
         logging.error(f"Lỗi chương trình: {e}")
     finally:
