@@ -1,6 +1,50 @@
 import cv2
 import numpy as np
 import time
+import serial
+import logging
+from datetime import datetime
+
+# Cấu hình logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(f'tomato_detection_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
+    ]
+)
+
+# Cấu hình UART
+UART_PORT = '/dev/ttyUSB0'  # Thay đổi tùy theo hệ thống
+UART_BAUDRATE = 115200
+UART_TIMEOUT = 1
+
+def init_uart():
+    """Khởi tạo kết nối UART"""
+    try:
+        ser = serial.Serial(UART_PORT, UART_BAUDRATE, timeout=UART_TIMEOUT)
+        if ser.is_open:
+            logging.info(f"Đã kết nối UART thành công - Port: {UART_PORT}, Baudrate: {UART_BAUDRATE}")
+            return ser
+        else:
+            logging.error(f"Không thể mở cổng UART: {UART_PORT}")
+            return None
+    except serial.SerialException as e:
+        logging.error(f"Lỗi kết nối UART: {e}")
+        return None
+
+def send_tomato_data(ser, color, center_x, center_y, radius):
+    """Gửi dữ liệu cà chua qua UART
+    Format: "color,x,y,radius\n"
+    """
+    if ser and ser.is_open:
+        data = f"{color},{center_x},{center_y},{radius}\n"
+        try:
+            ser.write(data.encode())
+            logging.debug(f"Đã gửi dữ liệu UART: {data.strip()}")
+        except serial.SerialException as e:
+            logging.error(f"Lỗi gửi dữ liệu UART: {e}")
 
 # --- Cấu hình ---
 LOWER_RED_HSV1 = np.array((0, 120, 70))
@@ -438,77 +482,136 @@ def process_video_frame(frame):
 
     return detected_objects_final, original_img_display
 
-def run_camera_detection(camera_id=0, target_fps=30):
+def run_camera_detection(camera_id=0, target_fps=30, use_uart=True, max_retries=3):
     """Chạy nhận diện liên tục từ camera
     Args:
         camera_id: ID của camera (mặc định là 0 cho webcam)
         target_fps: FPS mục tiêu
+        use_uart: True nếu muốn gửi dữ liệu qua UART
+        max_retries: Số lần thử lại tối đa khi gặp lỗi
     """
-    cap = cv2.VideoCapture(camera_id)
-    if not cap.isOpened():
-        print(f"Không thể mở camera {camera_id}")
-        return
-
-    frame_count = 0
-    start_time = time.time()
-    last_frame_time = start_time
-    frame_interval = 1.0 / target_fps
-
-    print(f"Bắt đầu nhận diện từ camera {camera_id}. Nhấn 'q' để thoát, 's' để lưu ảnh.")
-
-    try:
-        while True:
-            current_time = time.time()
-            elapsed_since_last_frame = current_time - last_frame_time
+    retry_count = 0
+    while retry_count < max_retries:
+        try:
+            # Khởi tạo UART nếu cần
+            ser = init_uart() if use_uart else None
             
-            # Kiểm soát FPS
-            if elapsed_since_last_frame < frame_interval:
-                time.sleep(frame_interval - elapsed_since_last_frame)
-                continue
+            # Khởi tạo camera
+            cap = cv2.VideoCapture(camera_id)
+            if not cap.isOpened():
+                logging.error(f"Không thể mở camera {camera_id}")
+                retry_count += 1
+                if retry_count < max_retries:
+                    logging.info(f"Đang thử lại sau 5 giây... (Lần {retry_count + 1}/{max_retries})")
+                    time.sleep(5)
+                    continue
+                else:
+                    logging.error("Đã vượt quá số lần thử lại cho phép")
+                    return
 
-            ret, frame = cap.read()
-            if not ret:
-                print("Không đọc được frame từ camera")
-                break
+            frame_count = 0
+            start_time = time.time()
+            last_frame_time = start_time
+            frame_interval = 1.0 / target_fps
+            consecutive_errors = 0
+            max_consecutive_errors = 10
 
-            frame_count += 1
-            last_frame_time = current_time
-            total_elapsed_time = current_time - start_time
+            logging.info(f"Bắt đầu nhận diện từ camera {camera_id}. Nhấn 'q' để thoát, 's' để lưu ảnh.")
 
-            # Xử lý frame
-            results, result_image = process_video_frame(frame)
+            while True:
+                current_time = time.time()
+                elapsed_since_last_frame = current_time - last_frame_time
+                
+                # Kiểm soát FPS
+                if elapsed_since_last_frame < frame_interval:
+                    time.sleep(frame_interval - elapsed_since_last_frame)
+                    continue
 
-            if result_image is not None:
-                # Hiển thị thông tin FPS và số frame
-                current_fps = frame_count / total_elapsed_time
-                fps_text = f"FPS: {current_fps:.1f}"
-                frame_text = f"Frame: {frame_count}"
-                cv2.putText(result_image, fps_text, (10, 30), 
-                          cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-                cv2.putText(result_image, frame_text, (10, 70),
-                          cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                ret, frame = cap.read()
+                if not ret:
+                    consecutive_errors += 1
+                    logging.warning(f"Không đọc được frame từ camera (Lỗi liên tiếp: {consecutive_errors})")
+                    if consecutive_errors >= max_consecutive_errors:
+                        logging.error("Quá nhiều lỗi liên tiếp, khởi động lại camera...")
+                        break
+                    time.sleep(0.1)  # Đợi một chút trước khi thử lại
+                    continue
 
-                cv2.imshow("Tomato Detection", result_image)
+                consecutive_errors = 0  # Reset số lỗi liên tiếp khi đọc frame thành công
+                frame_count += 1
+                last_frame_time = current_time
+                total_elapsed_time = current_time - start_time
 
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'):
-                print("Người dùng yêu cầu thoát")
-                break
-            elif key == ord('s') and result_image is not None:
-                timestamp = time.strftime("%Y%m%d_%H%M%S")
-                filename = f"detection_{timestamp}.jpg"
-                cv2.imwrite(filename, result_image)
-                print(f"Đã lưu ảnh: {filename}")
+                try:
+                    # Xử lý frame
+                    results, result_image = process_video_frame(frame)
 
-    except KeyboardInterrupt:
-        print("Chương trình bị ngắt bởi người dùng")
-    except Exception as e:
-        print(f"Lỗi không mong muốn: {e}")
-    finally:
-        print(f"Kết thúc chương trình. Đã xử lý {frame_count} frames trong {total_elapsed_time:.1f} giây")
-        print(f"FPS trung bình: {frame_count/total_elapsed_time:.1f}")
-        cap.release()
-        cv2.destroyAllWindows()
+                    if result_image is not None:
+                        # Hiển thị thông tin FPS và số frame
+                        current_fps = frame_count / total_elapsed_time
+                        fps_text = f"FPS: {current_fps:.1f}"
+                        frame_text = f"Frame: {frame_count}"
+                        cv2.putText(result_image, fps_text, (10, 30), 
+                                  cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                        cv2.putText(result_image, frame_text, (10, 70),
+                                  cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+
+                        cv2.imshow("Tomato Detection", result_image)
+
+                        # Gửi dữ liệu qua UART nếu phát hiện được đối tượng
+                        if results and use_uart and ser and ser.is_open:
+                            for obj in results:
+                                color_code = 1 if obj['type'] == "red" else 0
+                                center_x, center_y = obj['center_2d']
+                                radius = obj['radius_px']
+                                
+                                logging.info(
+                                    f"Frame {frame_count} - Phát hiện cà chua:\n"
+                                    f"  - Màu: {'Chín' if color_code == 1 else 'Xanh'}\n"
+                                    f"  - Vị trí: ({center_x}, {center_y})\n"
+                                    f"  - Bán kính: {radius}px\n"
+                                    f"  - Khoảng cách: {obj['estimated_distance_m']:.2f}m\n"
+                                    f"  - Offset Y: {obj['estimated_offset_y_m']:.2f}m"
+                                )
+                                
+                                send_tomato_data(ser, color_code, center_x, center_y, radius)
+
+                except Exception as e:
+                    logging.error(f"Lỗi khi xử lý frame {frame_count}: {e}")
+                    continue
+
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
+                    logging.info("Người dùng yêu cầu thoát")
+                    return
+                elif key == ord('s') and result_image is not None:
+                    timestamp = time.strftime("%Y%m%d_%H%M%S")
+                    filename = f"detection_{timestamp}.jpg"
+                    cv2.imwrite(filename, result_image)
+                    logging.info(f"Đã lưu ảnh: {filename}")
+
+        except KeyboardInterrupt:
+            logging.info("Chương trình bị ngắt bởi người dùng")
+            return
+        except Exception as e:
+            logging.error(f"Lỗi không mong muốn: {e}")
+            retry_count += 1
+            if retry_count < max_retries:
+                logging.info(f"Đang thử lại sau 5 giây... (Lần {retry_count + 1}/{max_retries})")
+                time.sleep(5)
+            else:
+                logging.error("Đã vượt quá số lần thử lại cho phép")
+                return
+        finally:
+            if 'cap' in locals() and cap.isOpened():
+                cap.release()
+            if 'ser' in locals() and ser and ser.is_open:
+                ser.close()
+                logging.info("Đã đóng kết nối UART")
+            cv2.destroyAllWindows()
+            logging.info(f"Kết thúc phiên làm việc. Đã xử lý {frame_count} frames trong {total_elapsed_time:.1f} giây")
+            if frame_count > 0:
+                logging.info(f"FPS trung bình: {frame_count/total_elapsed_time:.1f}")
 
 if __name__ == "__main__":
     print("Chương trình phát hiện cà chua từ camera")
@@ -517,5 +620,5 @@ if __name__ == "__main__":
     print(f"  UPPER: H={UPPER_TARGET_COLOR_HSV[0]}, S={UPPER_TARGET_COLOR_HSV[1]}, V={UPPER_TARGET_COLOR_HSV[2]}")
     print("-" * 30)
     
-    # Chạy nhận diện từ camera
-    run_camera_detection(camera_id=0, target_fps=30)
+    # Chạy nhận diện từ camera với UART
+    run_camera_detection(camera_id=0, target_fps=30, use_uart=True, max_retries=3)

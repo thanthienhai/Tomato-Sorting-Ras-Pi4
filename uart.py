@@ -1,30 +1,25 @@
 import serial
 import time
 
-# Cấu hình cổng UART
-port = '/dev/ttyUSB0'  # Thay đổi thành cổng UART của bạn, ví dụ: '/dev/ttyUSB0' trên Linux
-baudrate = 115200  # Tốc độ baud, thay đổi nếu cần
-timeout = 1  # Thời gian chờ (giây)
+# Cấu hình cổng serial (COMx đối với Windows hoặc /dev/ttyUSBx đối với Linux)
+serial_port = '/dev/ttyUSB0'  # Ví dụ trên Linux, có thể thay đổi tùy theo hệ thống
+baud_rate = 115200  # Tốc độ truyền
+timeout = 1  # Thời gian chờ để nhận dữ liệu (giây)
 
-# Khởi tạo kết nối UART
-try:
-    ser = serial.Serial(port, baudrate, timeout=timeout)
-    print(f"Đã kết nối với {port} tại {baudrate} baud")
-except serial.SerialException as e:
-    print(f"Lỗi kết nối: {e}")
+# Mở cổng serial
+ser = serial.Serial(serial_port, baudrate=baud_rate, timeout=timeout)
+
+# Kiểm tra xem cổng có mở thành công không
+if ser.is_open:
+    print(f"Đã kết nối với cổng: {serial_port}")
+else:
+    print(f"Lỗi khi kết nối với cổng {serial_port}")
     exit()
 
-# Chuỗi cần gửi
-message = "Hello, UART!\n"
+# Gửi dữ liệu qua UART
+ser.write(b'Hello UART!\n')  # Gửi một chuỗi dữ liệu
 
-# Gửi chuỗi qua UART
-try:
-    # Chuyển chuỗi thành bytes (encode sang UTF-8)
-    ser.write(message.encode('utf-8'))
-    print(f"Đã gửi: {message.strip()}")
-except Exception as e:
-    print(f"Lỗi khi gửi dữ liệu: {e}")
+# Đợi một chút trước khi đọc dữ liệu phản hồi
+time.sleep(1)
 
-# Đóng cổng UART
 ser.close()
-print("Đã đóng cổng UART")
