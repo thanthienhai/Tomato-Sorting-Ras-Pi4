@@ -478,11 +478,46 @@ def process_video(video_source=0, use_uart=True, target_fps=30):
             ser.close()
             logging.info("Đã đóng kết nối UART")
 
+def run_continuous_detection(video_source=0, use_uart=True, target_fps=30, max_retries=3):
+    """Chạy nhận diện liên tục từ video file hoặc camera
+    Args:
+        video_source: 0 cho webcam, hoặc đường dẫn file video
+        use_uart: True nếu muốn gửi dữ liệu qua UART
+        target_fps: FPS mục tiêu để xử lý video
+        max_retries: Số lần thử lại tối đa khi gặp lỗi
+    """
+    retry_count = 0
+    while retry_count < max_retries:
+        try:
+            logging.info(f"Bắt đầu chạy nhận diện liên tục (Lần thử {retry_count + 1}/{max_retries})")
+            process_video(video_source, use_uart, target_fps)
+            break
+        except Exception as e:
+            retry_count += 1
+            logging.error(f"Lỗi trong lần chạy thứ {retry_count}: {e}")
+            if retry_count < max_retries:
+                logging.info(f"Đang thử lại sau 5 giây...")
+                time.sleep(5)
+            else:
+                logging.error("Đã vượt quá số lần thử lại cho phép")
+                raise
+
 if __name__ == "__main__":
     try:
-        video_source = 0  # 0 cho webcam, hoặc đường dẫn file video
+        # Có thể chọn một trong hai cách:
+        # 1. Sử dụng webcam (mặc định)
+        video_source = 0
+        
+        # 2. Hoặc sử dụng file video
+        # video_source = "path/to/your/video.mp4"
+        
         logging.info("Khởi động chương trình phát hiện cà chua")
-        process_video(video_source, use_uart=True, target_fps=30)  # Có thể điều chỉnh target_fps
+        run_continuous_detection(
+            video_source=video_source,
+            use_uart=True,
+            target_fps=30,
+            max_retries=3
+        )
     except Exception as e:
         logging.error(f"Lỗi chương trình: {e}")
     finally:
