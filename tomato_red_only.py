@@ -47,14 +47,15 @@ def send_tomato_data(ser, color, center_x, center_y, radius):
             logging.error(f"Lỗi gửi dữ liệu UART: {e}")
 
 # --- Cấu hình ---
-LOWER_RED_HSV1 = np.array((0, 120, 70))
-UPPER_RED_HSV1 = np.array((8, 255, 255))
-LOWER_RED_HSV2 = np.array((165, 120, 70))
+# Điều chỉnh ngưỡng cho màu đỏ để bắt rộng hơn
+LOWER_RED_HSV1 = np.array((0, 100, 50))  # Giảm S và V để bắt bóng đỏ
+UPPER_RED_HSV1 = np.array((10, 255, 255))  # Tăng H_MAX để bắt bóng đỏ
+LOWER_RED_HSV2 = np.array((160, 100, 50))  # Giảm S và V để bắt bóng đỏ
 UPPER_RED_HSV2 = np.array((180, 255, 255))
 
-# --- NGƯỠNG CHO MÀU MỤC TIÊU (VÀNG) - ĐIỀU CHỈNH CHO LINH HOẠT HƠN ---
-LOWER_TARGET_COLOR_HSV = np.array((18, 40, 80))  # H_min, S_min, V_min giảm để bắt rộng hơn
-UPPER_TARGET_COLOR_HSV = np.array((38, 255, 255))  # H_max nới rộng, S_max, V_max giữ nguyên
+# --- NGƯỠNG CHO MÀU MỤC TIÊU (VÀNG) - ĐIỀU CHỈNH ĐỂ PHÂN BIỆT VỚI BÓNG ĐỎ ---
+LOWER_TARGET_COLOR_HSV = np.array((20, 60, 100))  # Tăng H_MIN để tránh bóng đỏ
+UPPER_TARGET_COLOR_HSV = np.array((35, 255, 255))  # Giảm H_MAX để tránh bóng đỏ
 
 MEDIAN_BLUR_KERNEL_SIZE = 5
 OPENING_KERNEL_SIZE = 5  # Có thể tăng lên 7 nếu mask ban đầu bị nhiễu nhiều
@@ -71,20 +72,20 @@ MIN_CIRCULARITY_RELAXED = 0.70  # Giảm nhẹ, vì mask ban đầu có thể ch
 ENABLE_POST_FILTER_COLOR_CLASSIFICATION = True
 # --- Ngưỡng phân loại màu ---
 CLASSIFY_RED_MIN_HUE1 = 0
-CLASSIFY_RED_MAX_HUE1 = 8
-CLASSIFY_RED_MIN_HUE2 = 165
+CLASSIFY_RED_MAX_HUE1 = 10  # Tăng để bắt bóng đỏ
+CLASSIFY_RED_MIN_HUE2 = 160
 CLASSIFY_RED_MAX_HUE2 = 180
-CLASSIFY_RED_MIN_SATURATION = 100
-CLASSIFY_RED_MIN_VALUE = 70
+CLASSIFY_RED_MIN_SATURATION = 50  # Giảm để bắt bóng đỏ
+CLASSIFY_RED_MIN_VALUE = 50  # Giảm để bắt bóng đỏ
 
 # --- NGƯỠNG PHÂN LOẠI CHO MÀU MỤC TIÊU (VÀNG) - ĐIỀU CHỈNH ---
-CLASSIFY_TARGET_MIN_HUE = 18  # Đồng bộ với LOWER_TARGET_COLOR_HSV
-CLASSIFY_TARGET_MAX_HUE = 40  # Hơi rộng hơn UPPER_TARGET_COLOR_HSV
-CLASSIFY_TARGET_MIN_SATURATION = 50  # Giảm để linh hoạt hơn
-CLASSIFY_TARGET_MIN_VALUE = 90  # Giảm để linh hoạt hơn
+CLASSIFY_TARGET_MIN_HUE = 20  # Tăng để tránh bóng đỏ
+CLASSIFY_TARGET_MAX_HUE = 35  # Giảm để tránh bóng đỏ
+CLASSIFY_TARGET_MIN_SATURATION = 60  # Tăng để phân biệt với bóng đỏ
+CLASSIFY_TARGET_MIN_VALUE = 100  # Tăng để phân biệt với bóng đỏ
 
-DOMINANT_PIXEL_RATIO_THRESHOLD = 0.35  # Giữ nguyên hoặc giảm nhẹ nếu màu không quá đồng nhất
-SIGNIFICANT_PIXEL_RATIO_THRESHOLD = 0.20
+DOMINANT_PIXEL_RATIO_THRESHOLD = 0.30  # Giảm để linh hoạt hơn
+SIGNIFICANT_PIXEL_RATIO_THRESHOLD = 0.15  # Giảm để linh hoạt hơn
 
 RADIUS_AT_KNOWN_DISTANCE_PX = 26
 KNOWN_DISTANCE_M = 0.4
@@ -106,74 +107,67 @@ def get_dominant_color_in_roi(hsv_image_roi, original_mask_roi):
     mean_hsv_roi_val = cv2.mean(hsv_image_roi, mask=original_mask_roi)
     hue_roi, saturation_roi, value_roi = mean_hsv_roi_val[0], mean_hsv_roi_val[1], mean_hsv_roi_val[2]
 
-    is_definitely_red = False
+    # Kiểm tra màu đỏ trước
     is_red_by_mean = ((CLASSIFY_RED_MIN_HUE1 <= hue_roi <= CLASSIFY_RED_MAX_HUE1 or
                        CLASSIFY_RED_MIN_HUE2 <= hue_roi <= CLASSIFY_RED_MAX_HUE2) and
                       saturation_roi >= CLASSIFY_RED_MIN_SATURATION and
                       value_roi >= CLASSIFY_RED_MIN_VALUE)
-    red_ratio = 0  # Khởi tạo
 
-    if is_red_by_mean:
-        temp_mask_red1 = cv2.inRange(hsv_image_roi,
-                                     np.array(
-                                         [CLASSIFY_RED_MIN_HUE1, CLASSIFY_RED_MIN_SATURATION, CLASSIFY_RED_MIN_VALUE]),
-                                     np.array([CLASSIFY_RED_MAX_HUE1, 255, 255]))
-        temp_mask_red2 = cv2.inRange(hsv_image_roi,
-                                     np.array(
-                                         [CLASSIFY_RED_MIN_HUE2, CLASSIFY_RED_MIN_SATURATION, CLASSIFY_RED_MIN_VALUE]),
-                                     np.array([CLASSIFY_RED_MAX_HUE2, 255, 255]))
-        mask_red_pixels_in_roi = cv2.bitwise_or(temp_mask_red1, temp_mask_red2)
-        mask_red_pixels_in_roi = cv2.bitwise_and(mask_red_pixels_in_roi, mask_red_pixels_in_roi, mask=original_mask_roi)
-        red_pixel_count = cv2.countNonZero(mask_red_pixels_in_roi)
-        red_ratio = red_pixel_count / total_pixels_in_contour
+    # Tạo mask cho màu đỏ
+    temp_mask_red1 = cv2.inRange(hsv_image_roi,
+                                 np.array([CLASSIFY_RED_MIN_HUE1, CLASSIFY_RED_MIN_SATURATION, CLASSIFY_RED_MIN_VALUE]),
+                                 np.array([CLASSIFY_RED_MAX_HUE1, 255, 255]))
+    temp_mask_red2 = cv2.inRange(hsv_image_roi,
+                                 np.array([CLASSIFY_RED_MIN_HUE2, CLASSIFY_RED_MIN_SATURATION, CLASSIFY_RED_MIN_VALUE]),
+                                 np.array([CLASSIFY_RED_MAX_HUE2, 255, 255]))
+    mask_red_pixels_in_roi = cv2.bitwise_or(temp_mask_red1, temp_mask_red2)
+    mask_red_pixels_in_roi = cv2.bitwise_and(mask_red_pixels_in_roi, mask_red_pixels_in_roi, mask=original_mask_roi)
+    red_pixel_count = cv2.countNonZero(mask_red_pixels_in_roi)
+    red_ratio = red_pixel_count / total_pixels_in_contour if total_pixels_in_contour > 0 else 0
 
-        if red_ratio >= DOMINANT_PIXEL_RATIO_THRESHOLD:
-            is_target_by_mean_check = (CLASSIFY_TARGET_MIN_HUE <= hue_roi <= CLASSIFY_TARGET_MAX_HUE and
-                                       saturation_roi >= CLASSIFY_TARGET_MIN_SATURATION and
-                                       value_roi >= CLASSIFY_TARGET_MIN_VALUE)
-            if is_target_by_mean_check:
-                temp_mask_target = cv2.inRange(hsv_image_roi,
-                                               np.array([CLASSIFY_TARGET_MIN_HUE, CLASSIFY_TARGET_MIN_SATURATION,
-                                                         CLASSIFY_TARGET_MIN_VALUE]),
-                                               np.array([CLASSIFY_TARGET_MAX_HUE, 255, 255]))
-                mask_target_pixels_in_roi_check = cv2.bitwise_and(temp_mask_target, temp_mask_target,
-                                                                  mask=original_mask_roi)
-                target_pixel_count_check = cv2.countNonZero(mask_target_pixels_in_roi_check)
-                target_ratio_check = target_pixel_count_check / total_pixels_in_contour
-                if red_ratio > target_ratio_check * 1.5: is_definitely_red = True
-            else:
-                is_definitely_red = True
-        elif red_ratio >= SIGNIFICANT_PIXEL_RATIO_THRESHOLD and not \
-                (CLASSIFY_TARGET_MIN_HUE <= hue_roi <= CLASSIFY_TARGET_MAX_HUE and \
-                 saturation_roi >= CLASSIFY_TARGET_MIN_SATURATION and \
-                 value_roi >= CLASSIFY_TARGET_MIN_VALUE):
-            is_definitely_red = True
+    # Kiểm tra màu target (vàng)
+    is_target_by_mean = (CLASSIFY_TARGET_MIN_HUE <= hue_roi <= CLASSIFY_TARGET_MAX_HUE and
+                        saturation_roi >= CLASSIFY_TARGET_MIN_SATURATION and
+                        value_roi >= CLASSIFY_TARGET_MIN_VALUE)
 
-    if is_definitely_red:
-        if SHOW_PROCESSING_STEPS: print(
-            f"    ROI Classified as RED: Mean(H:{hue_roi:.1f} S:{saturation_roi:.1f} V:{value_roi:.1f}), RedRatio:{red_ratio:.2f}")
+    temp_mask_target = cv2.inRange(hsv_image_roi,
+                                  np.array([CLASSIFY_TARGET_MIN_HUE, CLASSIFY_TARGET_MIN_SATURATION, CLASSIFY_TARGET_MIN_VALUE]),
+                                  np.array([CLASSIFY_TARGET_MAX_HUE, 255, 255]))
+    mask_target_pixels_in_roi = cv2.bitwise_and(temp_mask_target, temp_mask_target, mask=original_mask_roi)
+    target_pixel_count = cv2.countNonZero(mask_target_pixels_in_roi)
+    target_ratio = target_pixel_count / total_pixels_in_contour if total_pixels_in_contour > 0 else 0
+
+    if SHOW_PROCESSING_STEPS:
+        print(f"    ROI Color Analysis:")
+        print(f"      Mean HSV: H={hue_roi:.1f} S={saturation_roi:.1f} V={value_roi:.1f}")
+        print(f"      Red ratio: {red_ratio:.2f}, Target ratio: {target_ratio:.2f}")
+
+    # Logic phân loại màu mới
+    if is_red_by_mean and red_ratio >= DOMINANT_PIXEL_RATIO_THRESHOLD:
+        # Nếu có cả màu đỏ và target, so sánh tỷ lệ
+        if is_target_by_mean and target_ratio >= SIGNIFICANT_PIXEL_RATIO_THRESHOLD:
+            if red_ratio > target_ratio * 1.2:  # Giảm ngưỡng so sánh
+                return "red", hue_roi, saturation_roi, value_roi
+        else:
+            return "red", hue_roi, saturation_roi, value_roi
+
+    if is_target_by_mean and target_ratio >= DOMINANT_PIXEL_RATIO_THRESHOLD:
+        # Nếu có cả màu đỏ và target, so sánh tỷ lệ
+        if is_red_by_mean and red_ratio >= SIGNIFICANT_PIXEL_RATIO_THRESHOLD:
+            if target_ratio > red_ratio * 1.2:  # Giảm ngưỡng so sánh
+                return "target_color", hue_roi, saturation_roi, value_roi
+        else:
+            return "target_color", hue_roi, saturation_roi, value_roi
+
+    # Nếu không rõ ràng, ưu tiên màu đỏ nếu có dấu hiệu của màu đỏ
+    if is_red_by_mean and red_ratio >= SIGNIFICANT_PIXEL_RATIO_THRESHOLD:
         return "red", hue_roi, saturation_roi, value_roi
-    else:
-        is_target_by_mean_info = (CLASSIFY_TARGET_MIN_HUE <= hue_roi <= CLASSIFY_TARGET_MAX_HUE and
-                                  saturation_roi >= CLASSIFY_TARGET_MIN_SATURATION and
-                                  value_roi >= CLASSIFY_TARGET_MIN_VALUE)
 
-        temp_mask_target_color = cv2.inRange(hsv_image_roi,
-                                             np.array([CLASSIFY_TARGET_MIN_HUE, CLASSIFY_TARGET_MIN_SATURATION,
-                                                       CLASSIFY_TARGET_MIN_VALUE]),
-                                             np.array([CLASSIFY_TARGET_MAX_HUE, 255, 255]))
-        mask_target_color_pixels_in_roi = cv2.bitwise_and(temp_mask_target_color, temp_mask_target_color,
-                                                          mask=original_mask_roi)
-        target_color_pixel_count = cv2.countNonZero(mask_target_color_pixels_in_roi)
-        target_color_ratio = target_color_pixel_count / total_pixels_in_contour
-
-        if SHOW_PROCESSING_STEPS:
-            print(
-                f"    ROI Defaulted to TARGET_COLOR (Not Red): Mean(H:{hue_roi:.1f} S:{saturation_roi:.1f} V:{value_roi:.1f})")
-            print(
-                f"      TargetMatch (for info): {is_target_by_mean_info}, TargetRatio (for info): {target_color_ratio:.2f}")
-            print(f"      RedMatch (for info): {is_red_by_mean}, RedRatio (for info): {red_ratio:.2f}")
+    # Nếu không phải màu đỏ và có dấu hiệu của target color
+    if is_target_by_mean and target_ratio >= SIGNIFICANT_PIXEL_RATIO_THRESHOLD:
         return "target_color", hue_roi, saturation_roi, value_roi
+
+    return "unknown", hue_roi, saturation_roi, value_roi
 
 
 def detect_objects_contour_features(image_path):
