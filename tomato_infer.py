@@ -1,88 +1,309 @@
 """
 Tomato Classification Inference Script
-Dự đoán cà chua chín/xanh sử dụng model đã được huấn luyện
+Predict ripe/green tomatoes using a trained model
 """
 
-import tensorflow as tf
-import numpy as np
-import cv2
-import matplotlib.pyplot as plt
-from PIL import Image
-import argparse
 import os
+import sys
+import logging
+import subprocess
+from typing import Union, Dict, Optional, Tuple, Any
+from pathlib import Path
 import json
 from datetime import datetime
-import glob
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Force CPU usage
+os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+
+def install_requirements() -> bool:
+    """
+    Install required packages from requirements.txt.
+    
+    Returns:
+        bool: True if installation was successful, False otherwise
+    """
+    try:
+        requirements_file = "requirements.txt"
+        if not os.path.exists(requirements_file):
+            logger.error(f"requirements.txt not found in {os.getcwd()}")
+            return False
+
+        logger.info("Installing required packages...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", requirements_file])
+        logger.info("All required packages installed successfully!")
+        return True
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Error installing packages: {str(e)}")
+        return False
+    except Exception as e:
+        logger.error(f"Unexpected error during package installation: {str(e)}")
+        return False
+
+def check_packages() -> bool:
+    """
+    Check and verify required packages are installed.
+    
+    Returns:
+        bool: True if all packages are correctly installed, False otherwise
+    """
+    try:
+        # Try importing required packages
+        import numpy as np
+        import tensorflow as tf
+        import cv2
+        from PIL import Image
+        import matplotlib.pyplot as plt
+
+        # Check versions
+        required_versions = {
+            'numpy': '1.23.5',
+            'tensorflow': '2.10.0',
+            'opencv-python-headless': '4.8.0.76',
+            'pillow': '10.0.0',
+            'matplotlib': '3.7.2'
+        }
+
+        missing_packages = []
+        version_mismatches = []
+
+        for package, required_version in required_versions.items():
+            try:
+                if package == 'opencv-python-headless':
+                    installed_version = cv2.__version__
+                else:
+                    installed_version = eval(f"{package}.__version__")
+
+                if installed_version != required_version:
+                    version_mismatches.append(f"{package} (required: {required_version}, installed: {installed_version})")
+            except (AttributeError, NameError):
+                missing_packages.append(package)
+
+        if missing_packages or version_mismatches:
+            logger.error("\n=== PACKAGE ISSUES DETECTED ===")
+            if missing_packages:
+                logger.error("Missing packages:")
+                for package in missing_packages:
+                    logger.error(f"  - {package}")
+            if version_mismatches:
+                logger.error("Version mismatches:")
+                for mismatch in version_mismatches:
+                    logger.error(f"  - {mismatch}")
+            
+            logger.error("\nInstalling correct versions...")
+            if not install_requirements():
+                logger.error("Failed to install required packages. Please install them manually:")
+                logger.error("pip install -r requirements.txt")
+                return False
+            
+            # Verify installation after attempting to fix
+            return check_packages()
+        
+        return True
+            
+    except ImportError as e:
+        logger.error(f"Error importing required packages: {str(e)}")
+        logger.error("Installing required packages...")
+        if not install_requirements():
+            logger.error("Failed to install required packages. Please install them manually:")
+            logger.error("pip install -r requirements.txt")
+            return False
+        # Verify installation after attempting to fix
+        return check_packages()
+
+def setup_environment() -> bool:
+    """
+    Setup the environment and verify all requirements.
+    
+    Returns:
+        bool: True if setup was successful, False otherwise
+    """
+    # Check and install packages
+    if not check_packages():
+        logger.error("Failed to setup environment. Please check the errors above.")
+        return False
+    
+    # Additional environment setup if needed
+    try:
+        # Configure matplotlib to use non-interactive backend
+        import matplotlib
+        matplotlib.use('Agg')
+        
+        # Configure TensorFlow to use CPU only
+        import tensorflow as tf
+        tf.config.set_visible_devices([], 'GPU')
+        
+        return True
+    except Exception as e:
+        logger.error(f"Error during environment setup: {str(e)}")
+        return False
+
+# Setup environment before importing other packages
+if not setup_environment():
+    sys.exit(1)
+
+# Import required packages
+import numpy as np
+import cv2
+from PIL import Image
+import matplotlib.pyplot as plt
+import tensorflow as tf
+from tensorflow.keras.applications import MobileNetV3Large
 
 class TomatoInference:
-    def __init__(self, model_path=None, img_size=(224, 224)):
+    def __init__(self, model_path: str, img_size: Tuple[int, int] = (224, 224)):
+        """
+        Initialize the TomatoInference class.
+
+        Args:
+            model_path: Path to the trained model file
+            img_size: Input image size (height, width)
+        """
         self.img_size = img_size
         self.model = None
-        self.class_names = ['green', 'ripe']  # 0: xanh, 1: chín
-        self.class_names_vi = ['Xanh', 'Chín']  # Tiếng Việt
+        self.class_names = ['green', 'ripe']  # 0: green, 1: ripe
+        self.class_names_vi = ['Xanh', 'Chín']  # Vietnamese
+        
+        # Validate model path
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Model file not found: {model_path}")
+            
+        self.load_model(model_path)
 
-        if model_path:
-            self.load_model(model_path)
+    def load_model(self, model_path: str) -> bool:
+        """
+        Load a trained model.
 
-    def load_model(self, model_path):
-        """Load model đã được huấn luyện"""
+        Args:
+            model_path: Path to the model file
+
+        Returns:
+            bool: True if model loaded successfully, False otherwise
+        """
         try:
-            print(f"Đang load model từ: {model_path}")
-            self.model = tf.keras.models.load_model(model_path)
-            print("Model đã được load thành công!")
-            print(f"Input shape: {self.model.input_shape}")
-            print(f"Output shape: {self.model.output_shape}")
+            logger.info(f"Loading model from: {model_path}")
+            
+            # Check file extension
+            if not model_path.endswith('.h5'):
+                raise ValueError("Model file must have .h5 extension")
+            
+            # Load model with custom_objects if needed
+            self.model = tf.keras.models.load_model(
+                model_path,
+                compile=False,  # Don't compile the model
+                custom_objects={'tf': tf}  # Add custom objects if needed
+            )
+            
+            # Verify model structure
+            if not isinstance(self.model, tf.keras.Model):
+                raise ValueError("Loaded model is not a valid Keras model")
+            
+            # Compile model with appropriate settings
+            self.model.compile(
+                optimizer='adam',
+                loss='categorical_crossentropy',
+                metrics=['accuracy']
+            )
+            
+            logger.info("Model loaded successfully!")
+            logger.info(f"Input shape: {self.model.input_shape}")
+            logger.info(f"Output shape: {self.model.output_shape}")
+            return True
+
         except Exception as e:
-            print(f"Lỗi khi load model: {e}")
+            logger.error(f"Error loading model: {str(e)}")
             return False
-        return True
 
-    def preprocess_image(self, image_input):
-        """Tiền xử lý ảnh cho inference"""
-        # Xử lý input (có thể là file path, numpy array, hoặc PIL Image)
-        if isinstance(image_input, str):
-            # Load từ file path
-            if not os.path.exists(image_input):
-                raise FileNotFoundError(f"Không tìm thấy file: {image_input}")
-            img = cv2.imread(image_input)
-            if img is None:
-                raise ValueError(f"Không thể đọc ảnh: {image_input}")
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        elif isinstance(image_input, np.ndarray):
-            img = image_input
-        elif isinstance(image_input, Image.Image):
-            img = np.array(image_input)
-        else:
-            raise ValueError("Input không hợp lệ. Cần file path, numpy array, hoặc PIL Image")
+    def preprocess_image(self, image_input: Union[str, np.ndarray, Image.Image]) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Preprocess image for inference.
 
-        # Resize về kích thước model yêu cầu
-        img_resized = cv2.resize(img, self.img_size)
+        Args:
+            image_input: Input image (file path, numpy array, or PIL Image)
 
-        # Normalize về [0, 1]
-        img_normalized = img_resized.astype(np.float32) / 255.0
+        Returns:
+            Tuple of (processed_image, original_image)
+        """
+        try:
+            # Handle different input types
+            if isinstance(image_input, str):
+                if not os.path.exists(image_input):
+                    raise FileNotFoundError(f"Image file not found: {image_input}")
+                    
+                # Check file extension
+                if not image_input.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
+                    raise ValueError("Unsupported image format")
+                    
+                img = cv2.imread(image_input)
+                if img is None:
+                    raise ValueError(f"Failed to read image: {image_input}")
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                
+            elif isinstance(image_input, np.ndarray):
+                img = image_input
+                if len(img.shape) != 3:
+                    raise ValueError("Input image must be 3D (height, width, channels)")
+                    
+            elif isinstance(image_input, Image.Image):
+                img = np.array(image_input)
+            else:
+                raise ValueError("Invalid input type. Expected file path, numpy array, or PIL Image")
 
-        # Thêm batch dimension
-        img_batch = np.expand_dims(img_normalized, axis=0)
+            # Store original image
+            original_img = img.copy()
 
-        return img_batch, img
+            # Resize to model input size
+            img_resized = cv2.resize(img, self.img_size)
 
-    def predict_single_image(self, image_input, show_image=True, save_result=False):
-        """Dự đoán cho một ảnh"""
+            # Normalize to [0, 1] - match training preprocessing
+            img_normalized = img_resized.astype(np.float32) / 255.0
+
+            # Add batch dimension
+            img_batch = np.expand_dims(img_normalized, axis=0)
+
+            return img_batch, original_img
+
+        except Exception as e:
+            logger.error(f"Error preprocessing image: {str(e)}")
+            raise
+
+    def predict_single_image(
+        self,
+        image_input: Union[str, np.ndarray, Image.Image],
+        show_image: bool = True,
+        save_result: bool = False
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Predict class for a single image.
+
+        Args:
+            image_input: Input image (file path, numpy array, or PIL Image)
+            show_image: Whether to display the image with prediction
+            save_result: Whether to save prediction results
+
+        Returns:
+            Dictionary containing prediction results if successful, None otherwise
+        """
         if self.model is None:
-            print("Model chưa được load. Vui lòng load model trước.")
+            logger.error("Model not loaded. Please load a model first.")
             return None
 
         try:
-            # Preprocess
+            # Preprocess image
             processed_img, original_img = self.preprocess_image(image_input)
 
-            # Prediction
+            # Get prediction
             predictions = self.model.predict(processed_img, verbose=0)
             predicted_class = np.argmax(predictions[0])
             confidence = predictions[0][predicted_class]
 
-            # Kết quả
+            # Prepare results
             result = {
                 'timestamp': datetime.now().isoformat(),
                 'predicted_class_id': int(predicted_class),
@@ -99,232 +320,113 @@ class TomatoInference:
                 }
             }
 
-            # Hiển thị kết quả
-            print(f"\n=== KẾT QUẢ DỰ ĐOÁN ===")
-            print(f"Loại cà chua: {result['predicted_class_vi']}")
-            print(f"Độ tin cậy: {result['confidence']:.2%}")
-            print(f"Xác suất:")
-            print(f"  - Xanh: {result['probabilities']['green']:.2%}")
-            print(f"  - Chín: {result['probabilities']['ripe']:.2%}")
+            # Log results
+            logger.info("\n=== PREDICTION RESULTS ===")
+            logger.info(f"Tomato Type: {result['predicted_class_vi']}")
+            logger.info(f"Confidence: {result['confidence']:.2%}")
+            logger.info("Probabilities:")
+            logger.info(f"  - Green: {result['probabilities']['green']:.2%}")
+            logger.info(f"  - Ripe: {result['probabilities']['ripe']:.2%}")
 
-            # Hiển thị ảnh
+            # Display image if requested
             if show_image:
                 self.display_prediction(original_img, result)
 
-            # Lưu kết quả
+            # Save results if requested
             if save_result:
                 self.save_prediction_result(result, image_input)
 
             return result
 
         except Exception as e:
-            print(f"Lỗi trong quá trình dự đoán: {e}")
+            logger.error(f"Error during prediction: {str(e)}")
             return None
 
-    def predict_batch(self, image_paths, save_results=False):
-        """Dự đoán cho nhiều ảnh"""
-        if not image_paths:
-            print("Danh sách ảnh trống.")
-            return []
+    def display_prediction(self, image: np.ndarray, result: Dict[str, Any]) -> None:
+        """
+        Display image with prediction results.
 
-        print(f"Đang dự đoán cho {len(image_paths)} ảnh...")
-        results = []
+        Args:
+            image: Input image
+            result: Prediction results
+        """
+        try:
+            plt.figure(figsize=(8, 6))
+            plt.imshow(image)
 
-        for i, img_path in enumerate(image_paths):
-            print(f"\nXử lý ảnh {i + 1}/{len(image_paths)}: {os.path.basename(img_path)}")
+            # Create title with prediction info
+            title = f"Prediction: {result['predicted_class_vi']}\n"
+            title += f"Confidence: {result['confidence']:.1%}"
 
-            result = self.predict_single_image(
-                img_path,
-                show_image=False,
-                save_result=False
-            )
+            # Set color based on prediction
+            color = 'green' if result['predicted_class'] == 'green' else 'red'
 
-            if result:
-                result['image_path'] = img_path
-                result['image_name'] = os.path.basename(img_path)
-                results.append(result)
+            plt.title(title, fontsize=14, color=color, fontweight='bold')
+            plt.axis('off')
+            plt.tight_layout()
+            plt.show()
 
-        # Lưu kết quả batch
-        if save_results and results:
-            self.save_batch_results(results)
+        except Exception as e:
+            logger.error(f"Error displaying prediction: {str(e)}")
+            raise
 
-        # Tóm tắt kết quả
-        self.print_batch_summary(results)
+    def save_prediction_result(self, result: Dict[str, Any], image_path: Union[str, Path]) -> None:
+        """
+        Save prediction results to JSON file.
 
-        return results
+        Args:
+            result: Prediction results
+            image_path: Path to the input image
+        """
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"prediction_{timestamp}.json"
 
-    def predict_folder(self, folder_path, image_extensions=None, save_results=False):
-        """Dự đoán cho tất cả ảnh trong thư mục"""
-        if image_extensions is None:
-            image_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff']
+            # Add image info
+            result['image_info'] = {
+                'path': str(image_path),
+                'name': os.path.basename(str(image_path))
+            }
 
-        # Tìm tất cả file ảnh
-        image_paths = []
-        for ext in image_extensions:
-            pattern = os.path.join(folder_path, f"*{ext}")
-            image_paths.extend(glob.glob(pattern, recursive=False))
-            pattern = os.path.join(folder_path, f"*{ext.upper()}")
-            image_paths.extend(glob.glob(pattern, recursive=False))
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(result, f, ensure_ascii=False, indent=2)
 
-        if not image_paths:
-            print(f"Không tìm thấy ảnh nào trong thư mục: {folder_path}")
-            return []
+            logger.info(f"Results saved to: {filename}")
 
-        print(f"Tìm thấy {len(image_paths)} ảnh trong thư mục: {folder_path}")
-
-        return self.predict_batch(image_paths, save_results=save_results)
-
-    def display_prediction(self, image, result):
-        """Hiển thị ảnh với kết quả dự đoán"""
-        plt.figure(figsize=(8, 6))
-        plt.imshow(image)
-
-        # Tạo title với thông tin dự đoán
-        title = f"Dự đoán: {result['predicted_class_vi']}\n"
-        title += f"Độ tin cậy: {result['confidence']:.1%}"
-
-        # Màu sắc dựa trên kết quả
-        color = 'green' if result['predicted_class'] == 'green' else 'red'
-
-        plt.title(title, fontsize=14, color=color, fontweight='bold')
-        plt.axis('off')
-        plt.tight_layout()
-        plt.show()
-
-    def save_prediction_result(self, result, image_path):
-        """Lưu kết quả dự đoán đơn lẻ"""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"prediction_{timestamp}.json"
-
-        # Thêm thông tin ảnh
-        result['image_info'] = {
-            'path': str(image_path),
-            'name': os.path.basename(str(image_path))
-        }
-
-        with open(filename, 'w', encoding='utf-8') as f:
-            json.dump(result, f, ensure_ascii=False, indent=2)
-
-        print(f"Kết quả đã được lưu: {filename}")
-
-    def save_batch_results(self, results):
-        """Lưu kết quả dự đoán batch"""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"batch_predictions_{timestamp}.json"
-
-        # Tổng hợp thống kê
-        summary = {
-            'total_images': len(results),
-            'green_count': sum(1 for r in results if r['predicted_class'] == 'green'),
-            'ripe_count': sum(1 for r in results if r['predicted_class'] == 'ripe'),
-            'avg_confidence': np.mean([r['confidence'] for r in results]),
-            'timestamp': datetime.now().isoformat()
-        }
-
-        batch_data = {
-            'summary': summary,
-            'predictions': results
-        }
-
-        with open(filename, 'w', encoding='utf-8') as f:
-            json.dump(batch_data, f, ensure_ascii=False, indent=2)
-
-        print(f"Kết quả batch đã được lưu: {filename}")
-
-    def print_batch_summary(self, results):
-        """In tóm tắt kết quả batch"""
-        if not results:
-            return
-
-        green_count = sum(1 for r in results if r['predicted_class'] == 'green')
-        ripe_count = sum(1 for r in results if r['predicted_class'] == 'ripe')
-        avg_confidence = np.mean([r['confidence'] for r in results])
-
-        print(f"\n=== TÓM TẮT KẾT QUẢ ===")
-        print(f"Tổng số ảnh: {len(results)}")
-        print(f"Cà chua xanh: {green_count} ({green_count / len(results) * 100:.1f}%)")
-        print(f"Cà chua chín: {ripe_count} ({ripe_count / len(results) * 100:.1f}%)")
-        print(f"Độ tin cậy trung bình: {avg_confidence:.2%}")
-
-    def create_confidence_histogram(self, results, save_path=None):
-        """Tạo biểu đồ phân bố độ tin cậy"""
-        if not results:
-            return
-
-        confidences = [r['confidence'] for r in results]
-
-        plt.figure(figsize=(10, 6))
-        plt.hist(confidences, bins=20, alpha=0.7, color='skyblue', edgecolor='black')
-        plt.xlabel('Độ tin cậy')
-        plt.ylabel('Số lượng')
-        plt.title('Phân bố độ tin cậy dự đoán')
-        plt.grid(True, alpha=0.3)
-
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            print(f"Biểu đồ đã được lưu: {save_path}")
-
-        plt.show()
+        except Exception as e:
+            logger.error(f"Error saving prediction results: {str(e)}")
+            raise
 
 
-def main():
-    parser = argparse.ArgumentParser(description='Tomato Classification Inference')
-    parser.add_argument('--model', required=True, help='Đường dẫn đến model file (.h5)')
-    parser.add_argument('--image', help='Đường dẫn đến ảnh cần dự đoán')
-    parser.add_argument('--folder', help='Đường dẫn đến thư mục chứa ảnh')
-    parser.add_argument('--batch', nargs='+', help='Danh sách đường dẫn ảnh')
-    parser.add_argument('--save_results', action='store_true', help='Lưu kết quả dự đoán')
-    parser.add_argument('--no_display', action='store_true', help='Không hiển thị ảnh')
-
-    args = parser.parse_args()
-
-    # Kiểm tra GPU
-    print("GPU Available:", tf.config.list_physical_devices('GPU'))
-
-    # Khởi tạo inference engine
-    inference = TomatoInference()
-
-    # Load model
-    if not inference.load_model(args.model):
-        return
+def main() -> None:
+    """Main function to run inference."""
+    # Model and image paths
+    MODEL_PATH = "tomato_mobilenetv3_fine_tuned.h5"  # Path to your model file
+    IMAGE_PATH = "best4_jpeg.rf.3df643a002bf5a83cd6ef2b3ac572eae.jpg"  # Path to your test image
 
     try:
-        # Dự đoán cho ảnh đơn lẻ
-        if args.image:
-            result = inference.predict_single_image(
-                args.image,
-                show_image=not args.no_display,
-                save_result=args.save_results
-            )
-            if result:
-                print(f"\nKết quả: {result['predicted_class_vi']} ({result['confidence']:.2%})")
+        # Check if files exist
+        if not os.path.exists(MODEL_PATH):
+            raise FileNotFoundError(f"Model file not found: {MODEL_PATH}")
+        if not os.path.exists(IMAGE_PATH):
+            raise FileNotFoundError(f"Image file not found: {IMAGE_PATH}")
 
-        # Dự đoán cho thư mục
-        elif args.folder:
-            results = inference.predict_folder(
-                args.folder,
-                save_results=args.save_results
-            )
+        # Initialize inference engine
+        inference = TomatoInference(MODEL_PATH)
 
-            # Tạo biểu đồ nếu có nhiều kết quả
-            if len(results) > 5:
-                inference.create_confidence_histogram(
-                    results,
-                    f"confidence_histogram_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-                )
+        # Run prediction
+        result = inference.predict_single_image(
+            IMAGE_PATH,
+            show_image=True,
+            save_result=True
+        )
 
-        # Dự đoán cho batch ảnh
-        elif args.batch:
-            results = inference.predict_batch(
-                args.batch,
-                save_results=args.save_results
-            )
-
-        else:
-            print("Vui lòng chỉ định ảnh (--image), thư mục (--folder), hoặc batch (--batch)")
+        if result:
+            logger.info(f"\nFinal Result: {result['predicted_class_vi']} ({result['confidence']:.2%})")
 
     except Exception as e:
-        print(f"Lỗi trong quá trình inference: {e}")
+        logger.error(f"Error during inference: {str(e)}")
+        raise
 
 
 if __name__ == "__main__":
