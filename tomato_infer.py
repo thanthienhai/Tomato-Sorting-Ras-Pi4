@@ -1,433 +1,423 @@
-"""
-Tomato Classification Inference Script
-Predict ripe/green tomatoes using a trained model
-"""
-
-import os
-import sys
+import cv2
+import numpy as np
+import time
+import serial  # Bỏ nếu không dùng UART
 import logging
-import subprocess
-from typing import Union, Dict, Optional, Tuple, Any
-from pathlib import Path
-import json
 from datetime import datetime
 
-# Configure logging
+# --- Cấu hình Logging ---
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    level=logging.INFO,  # Đổi thành logging.DEBUG để xem log chi tiết hơn
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(f'object_detection_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
+    ]
 )
-logger = logging.getLogger(__name__)
 
-# Force CPU usage
-os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+# --- Cấu hình UART ---
+USE_UART = True  # Đặt True nếu muốn dùng UART
+UART_PORT = '/dev/ttyUSB0'  # Thay đổi nếu cần
+UART_BAUDRATE = 115200
+UART_TIMEOUT = 1
+ser_instance_global = None
 
-def install_requirements() -> bool:
-    """
-    Install required packages from requirements.txt.
-    
-    Returns:
-        bool: True if installation was successful, False otherwise
-    """
-    try:
-        requirements_file = "requirements.txt"
-        if not os.path.exists(requirements_file):
-            logger.error(f"requirements.txt not found in {os.getcwd()}")
-            return False
+# --- Cấu hình Màu sắc và Xử lý Ảnh ---
+LOWER_RED_HSV1 = np.array((0, 100, 80))
+UPPER_RED_HSV1 = np.array((10, 255, 255))
+LOWER_RED_HSV2 = np.array((160, 100, 80))
+UPPER_RED_HSV2 = np.array((180, 255, 255))
 
-        logger.info("Installing required packages...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", requirements_file])
-        logger.info("All required packages installed successfully!")
-        return True
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Error installing packages: {str(e)}")
-        return False
-    except Exception as e:
-        logger.error(f"Unexpected error during package installation: {str(e)}")
-        return False
+LOWER_TARGET_COLOR_HSV = np.array((18, 50, 80))  # Target color (xanh/vàng)
+UPPER_TARGET_COLOR_HSV = np.array((38, 255, 255))
 
-def check_packages() -> bool:
-    """
-    Check and verify required packages are installed.
-    
-    Returns:
-        bool: True if all packages are correctly installed, False otherwise
-    """
-    try:
-        # Try importing required packages
-        import numpy as np
-        import tensorflow as tf
-        import cv2
-        from PIL import Image
-        import matplotlib.pyplot as plt
+# --- THÊM MÀU GREEN-2 ---
+# RGB(69, 141, 80) -> HSV khoảng (70, 122, 141)
+LOWER_GREEN2_HSV = np.array((65, 80, 70))  # Hơi nới lỏng S và V
+UPPER_GREEN2_HSV = np.array((85, 255, 220))  # Hơi nới lỏng S và V
+# --------------------------
 
-        # Check versions
-        required_versions = {
-            'numpy': '1.23.5',
-            'tensorflow': '2.10.0',
-            'opencv-python-headless': '4.8.0.76',
-            'pillow': '10.0.0',
-            'matplotlib': '3.7.2'
-        }
+MEDIAN_BLUR_KERNEL_SIZE = 5
+OPENING_KERNEL_SIZE = 5
+OPENING_ITERATIONS = 1
+DILATE_ITERATIONS_AFTER_OPENING = 5
 
-        missing_packages = []
-        version_mismatches = []
+MIN_CONTOUR_AREA = 800
+MIN_SOLIDITY = 0.70
+MIN_ASPECT_RATIO = 0.55
+MAX_ASPECT_RATIO = 1.45
+MIN_EXTENT = 0.40
+MIN_CIRCULARITY_RELAXED = 0.60
 
-        for package, required_version in required_versions.items():
-            try:
-                if package == 'opencv-python-headless':
-                    installed_version = cv2.__version__
-                else:
-                    installed_version = eval(f"{package}.__version__")
+ENABLE_POST_FILTER_COLOR_CLASSIFICATION = True
 
-                if installed_version != required_version:
-                    version_mismatches.append(f"{package} (required: {required_version}, installed: {installed_version})")
-            except (AttributeError, NameError):
-                missing_packages.append(package)
+CLASSIFY_RED_MIN_HUE1 = 0
+CLASSIFY_RED_MAX_HUE1 = 12
+CLASSIFY_RED_MIN_HUE2 = 158
+CLASSIFY_RED_MAX_HUE2 = 180
+CLASSIFY_RED_MIN_SATURATION = 80
+CLASSIFY_RED_MIN_VALUE = 70
 
-        if missing_packages or version_mismatches:
-            logger.error("\n=== PACKAGE ISSUES DETECTED ===")
-            if missing_packages:
-                logger.error("Missing packages:")
-                for package in missing_packages:
-                    logger.error(f"  - {package}")
-            if version_mismatches:
-                logger.error("Version mismatches:")
-                for mismatch in version_mismatches:
-                    logger.error(f"  - {mismatch}")
-            
-            logger.error("\nInstalling correct versions...")
-            if not install_requirements():
-                logger.error("Failed to install required packages. Please install them manually:")
-                logger.error("pip install -r requirements.txt")
-                return False
-            
-            # Verify installation after attempting to fix
-            return check_packages()
-        
-        return True
-            
-    except ImportError as e:
-        logger.error(f"Error importing required packages: {str(e)}")
-        logger.error("Installing required packages...")
-        if not install_requirements():
-            logger.error("Failed to install required packages. Please install them manually:")
-            logger.error("pip install -r requirements.txt")
-            return False
-        # Verify installation after attempting to fix
-        return check_packages()
+CLASSIFY_TARGET_MIN_HUE = 18
+CLASSIFY_TARGET_MAX_HUE = 40
+CLASSIFY_TARGET_MIN_SATURATION = 50
+CLASSIFY_TARGET_MIN_VALUE = 80
 
-def setup_environment() -> bool:
-    """
-    Setup the environment and verify all requirements.
-    
-    Returns:
-        bool: True if setup was successful, False otherwise
-    """
-    # Check and install packages
-    if not check_packages():
-        logger.error("Failed to setup environment. Please check the errors above.")
-        return False
-    
-    # Additional environment setup if needed
-    try:
-        # Configure matplotlib to use non-interactive backend
-        import matplotlib
-        matplotlib.use('Agg')
-        
-        # Configure TensorFlow to use CPU only
-        import tensorflow as tf
-        tf.config.set_visible_devices([], 'GPU')
-        
-        return True
-    except Exception as e:
-        logger.error(f"Error during environment setup: {str(e)}")
-        return False
+# --- THÊM THAM SỐ PHÂN LOẠI CHO GREEN-2 ---
+CLASSIFY_GREEN2_MIN_HUE = 65
+CLASSIFY_GREEN2_MAX_HUE = 85
+CLASSIFY_GREEN2_MIN_SATURATION = 80
+CLASSIFY_GREEN2_MIN_VALUE = 70
+# -----------------------------------------
 
-# Setup environment before importing other packages
-if not setup_environment():
-    sys.exit(1)
+DOMINANT_PIXEL_RATIO_THRESHOLD = 0.40
+SIGNIFICANT_PIXEL_RATIO_THRESHOLD = 0.25
 
-# Import required packages
-import numpy as np
-import cv2
-from PIL import Image
-import matplotlib.pyplot as plt
-import tensorflow as tf
-from tensorflow.keras.applications import MobileNetV3Large
+SHOW_FINAL_RESULT_IMAGE_ONLY = True
+ONLY_DETECT_LARGEST_CONTOUR = True
 
-class TomatoInference:
-    def __init__(self, model_path: str, img_size: Tuple[int, int] = (224, 224)):
-        """
-        Initialize the TomatoInference class.
 
-        Args:
-            model_path: Path to the trained model file
-            img_size: Input image size (height, width)
-        """
-        self.img_size = img_size
-        self.model = None
-        self.class_names = ['green', 'ripe']  # 0: green, 1: ripe
-        self.class_names_vi = ['Xanh', 'Chín']  # Vietnamese
-        
-        # Validate model path
-        if not os.path.exists(model_path):
-            raise FileNotFoundError(f"Model file not found: {model_path}")
-            
-        self.load_model(model_path)
-
-    def load_model(self, model_path: str) -> bool:
-        """
-        Load a trained model.
-
-        Args:
-            model_path: Path to the model file
-
-        Returns:
-            bool: True if model loaded successfully, False otherwise
-        """
+def init_uart_if_needed():
+    global ser_instance_global
+    if USE_UART and (ser_instance_global is None or not ser_instance_global.is_open):
         try:
-            logger.info(f"Loading model from: {model_path}")
-            
-            # Check file extension
-            if not model_path.endswith('.h5'):
-                raise ValueError("Model file must have .h5 extension")
-            
-            # Load model with custom_objects if needed
-            self.model = tf.keras.models.load_model(
-                model_path,
-                compile=False,  # Don't compile the model
-                custom_objects={'tf': tf}  # Add custom objects if needed
-            )
-            
-            # Verify model structure
-            if not isinstance(self.model, tf.keras.Model):
-                raise ValueError("Loaded model is not a valid Keras model")
-            
-            # Compile model with appropriate settings
-            self.model.compile(
-                optimizer='adam',
-                loss='categorical_crossentropy',
-                metrics=['accuracy']
-            )
-            
-            logger.info("Model loaded successfully!")
-            logger.info(f"Input shape: {self.model.input_shape}")
-            logger.info(f"Output shape: {self.model.output_shape}")
-            return True
-
-        except Exception as e:
-            logger.error(f"Error loading model: {str(e)}")
-            return False
-
-    def preprocess_image(self, image_input: Union[str, np.ndarray, Image.Image]) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Preprocess image for inference.
-
-        Args:
-            image_input: Input image (file path, numpy array, or PIL Image)
-
-        Returns:
-            Tuple of (processed_image, original_image)
-        """
-        try:
-            # Handle different input types
-            if isinstance(image_input, str):
-                if not os.path.exists(image_input):
-                    raise FileNotFoundError(f"Image file not found: {image_input}")
-                    
-                # Check file extension
-                if not image_input.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
-                    raise ValueError("Unsupported image format")
-                    
-                img = cv2.imread(image_input)
-                if img is None:
-                    raise ValueError(f"Failed to read image: {image_input}")
-                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                
-            elif isinstance(image_input, np.ndarray):
-                img = image_input
-                if len(img.shape) != 3:
-                    raise ValueError("Input image must be 3D (height, width, channels)")
-                    
-            elif isinstance(image_input, Image.Image):
-                img = np.array(image_input)
+            ser_instance_global = serial.Serial(UART_PORT, UART_BAUDRATE, timeout=UART_TIMEOUT)
+            if ser_instance_global.is_open:
+                logging.info(f"Đã kết nối UART: {UART_PORT}")
             else:
-                raise ValueError("Invalid input type. Expected file path, numpy array, or PIL Image")
+                logging.error(f"Không thể mở UART: {UART_PORT}")
+                ser_instance_global = None
+        except serial.SerialException as e:
+            logging.error(f"Lỗi UART: {e}")
+            ser_instance_global = None
+    return ser_instance_global
 
-            # Store original image
-            original_img = img.copy()
 
-            # Resize to model input size
-            img_resized = cv2.resize(img, self.img_size)
+def send_object_data_uart(color_code, center_x, center_y, radius):
+    global ser_instance_global
+    if not USE_UART: return
 
-            # Normalize to [0, 1] - match training preprocessing
-            img_normalized = img_resized.astype(np.float32) / 255.0
-
-            # Add batch dimension
-            img_batch = np.expand_dims(img_normalized, axis=0)
-
-            return img_batch, original_img
-
-        except Exception as e:
-            logger.error(f"Error preprocessing image: {str(e)}")
-            raise
-
-    def predict_single_image(
-        self,
-        image_input: Union[str, np.ndarray, Image.Image],
-        show_image: bool = True,
-        save_result: bool = False
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Predict class for a single image.
-
-        Args:
-            image_input: Input image (file path, numpy array, or PIL Image)
-            show_image: Whether to display the image with prediction
-            save_result: Whether to save prediction results
-
-        Returns:
-            Dictionary containing prediction results if successful, None otherwise
-        """
-        if self.model is None:
-            logger.error("Model not loaded. Please load a model first.")
-            return None
-
+    if ser_instance_global and ser_instance_global.is_open:
+        data = f"{color_code},{center_x},{center_y},{radius}\n"
         try:
-            # Preprocess image
-            processed_img, original_img = self.preprocess_image(image_input)
-
-            # Get prediction
-            predictions = self.model.predict(processed_img, verbose=0)
-            predicted_class = np.argmax(predictions[0])
-            confidence = predictions[0][predicted_class]
-
-            # Prepare results
-            result = {
-                'timestamp': datetime.now().isoformat(),
-                'predicted_class_id': int(predicted_class),
-                'predicted_class': self.class_names[predicted_class],
-                'predicted_class_vi': self.class_names_vi[predicted_class],
-                'confidence': float(confidence),
-                'probabilities': {
-                    'green': float(predictions[0][0]),
-                    'ripe': float(predictions[0][1])
-                },
-                'probabilities_vi': {
-                    'xanh': float(predictions[0][0]),
-                    'chin': float(predictions[0][1])
-                }
-            }
-
-            # Log results
-            logger.info("\n=== PREDICTION RESULTS ===")
-            logger.info(f"Tomato Type: {result['predicted_class_vi']}")
-            logger.info(f"Confidence: {result['confidence']:.2%}")
-            logger.info("Probabilities:")
-            logger.info(f"  - Green: {result['probabilities']['green']:.2%}")
-            logger.info(f"  - Ripe: {result['probabilities']['ripe']:.2%}")
-
-            # Display image if requested
-            if show_image:
-                self.display_prediction(original_img, result)
-
-            # Save results if requested
-            if save_result:
-                self.save_prediction_result(result, image_input)
-
-            return result
-
-        except Exception as e:
-            logger.error(f"Error during prediction: {str(e)}")
-            return None
-
-    def display_prediction(self, image: np.ndarray, result: Dict[str, Any]) -> None:
-        """
-        Display image with prediction results.
-
-        Args:
-            image: Input image
-            result: Prediction results
-        """
-        try:
-            plt.figure(figsize=(8, 6))
-            plt.imshow(image)
-
-            # Create title with prediction info
-            title = f"Prediction: {result['predicted_class_vi']}\n"
-            title += f"Confidence: {result['confidence']:.1%}"
-
-            # Set color based on prediction
-            color = 'green' if result['predicted_class'] == 'green' else 'red'
-
-            plt.title(title, fontsize=14, color=color, fontweight='bold')
-            plt.axis('off')
-            plt.tight_layout()
-            plt.show()
-
-        except Exception as e:
-            logger.error(f"Error displaying prediction: {str(e)}")
-            raise
-
-    def save_prediction_result(self, result: Dict[str, Any], image_path: Union[str, Path]) -> None:
-        """
-        Save prediction results to JSON file.
-
-        Args:
-            result: Prediction results
-            image_path: Path to the input image
-        """
-        try:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"prediction_{timestamp}.json"
-
-            # Add image info
-            result['image_info'] = {
-                'path': str(image_path),
-                'name': os.path.basename(str(image_path))
-            }
-
-            with open(filename, 'w', encoding='utf-8') as f:
-                json.dump(result, f, ensure_ascii=False, indent=2)
-
-            logger.info(f"Results saved to: {filename}")
-
-        except Exception as e:
-            logger.error(f"Error saving prediction results: {str(e)}")
-            raise
+            ser_instance_global.write(data.encode())
+            if color_code == 0 and center_x == 0 and center_y == 0 and radius == 0:
+                logging.debug(f"Sent UART (No Detection): {data.strip()}")
+            else:
+                logging.info(f"Sent UART (Detection): {data.strip()}")
+        except serial.SerialException as e:
+            logging.error(f"Lỗi gửi UART: {e}")
+    else:
+        if not ser_instance_global:
+            logging.warning("UART send: ser_instance_global is None.")
+        elif not ser_instance_global.is_open:
+            logging.warning("UART send: ser_instance_global is not open.")
 
 
-def main() -> None:
-    """Main function to run inference."""
-    # Model and image paths
-    MODEL_PATH = "tomato_mobilenetv3_fine_tuned.h5"  # Path to your model file
-    IMAGE_PATH = "best4_jpeg.rf.3df643a002bf5a83cd6ef2b3ac572eae.jpg"  # Path to your test image
+# CẬP NHẬT HÀM get_dominant_color_in_roi ĐỂ XỬ LÝ 3 MÀU
+def get_dominant_color_in_roi(hsv_image_roi, original_mask_roi):
+    total_pixels_in_contour = cv2.countNonZero(original_mask_roi)
+    if total_pixels_in_contour == 0: return "unknown", 0, 0, 0
 
-    try:
-        # Check if files exist
-        if not os.path.exists(MODEL_PATH):
-            raise FileNotFoundError(f"Model file not found: {MODEL_PATH}")
-        if not os.path.exists(IMAGE_PATH):
-            raise FileNotFoundError(f"Image file not found: {IMAGE_PATH}")
+    mean_hsv_roi_val = cv2.mean(hsv_image_roi, mask=original_mask_roi)
+    hue_roi, saturation_roi, value_roi = mean_hsv_roi_val[0], mean_hsv_roi_val[1], mean_hsv_roi_val[2]
 
-        # Initialize inference engine
-        inference = TomatoInference(MODEL_PATH)
+    # Phân tích màu Đỏ
+    is_red_by_mean = ((CLASSIFY_RED_MIN_HUE1 <= hue_roi <= CLASSIFY_RED_MAX_HUE1 or
+                       CLASSIFY_RED_MIN_HUE2 <= hue_roi <= CLASSIFY_RED_MAX_HUE2) and
+                      saturation_roi >= CLASSIFY_RED_MIN_SATURATION and
+                      value_roi >= CLASSIFY_RED_MIN_VALUE)
+    temp_mask_red1 = cv2.inRange(hsv_image_roi,
+                                 np.array([CLASSIFY_RED_MIN_HUE1, CLASSIFY_RED_MIN_SATURATION, CLASSIFY_RED_MIN_VALUE]),
+                                 np.array([CLASSIFY_RED_MAX_HUE1, 255, 255]))
+    temp_mask_red2 = cv2.inRange(hsv_image_roi,
+                                 np.array([CLASSIFY_RED_MIN_HUE2, CLASSIFY_RED_MIN_SATURATION, CLASSIFY_RED_MIN_VALUE]),
+                                 np.array([CLASSIFY_RED_MAX_HUE2, 255, 255]))
+    mask_red_pixels_in_roi = cv2.bitwise_or(temp_mask_red1, temp_mask_red2)
+    mask_red_pixels_in_roi = cv2.bitwise_and(mask_red_pixels_in_roi, mask_red_pixels_in_roi, mask=original_mask_roi)
+    red_pixel_count = cv2.countNonZero(mask_red_pixels_in_roi)
+    red_ratio = red_pixel_count / total_pixels_in_contour if total_pixels_in_contour > 0 else 0
 
-        # Run prediction
-        result = inference.predict_single_image(
-            IMAGE_PATH,
-            show_image=True,
-            save_result=True
-        )
+    # Phân tích màu Target (Xanh/Vàng)
+    is_target_by_mean = (CLASSIFY_TARGET_MIN_HUE <= hue_roi <= CLASSIFY_TARGET_MAX_HUE and
+                         saturation_roi >= CLASSIFY_TARGET_MIN_SATURATION and
+                         value_roi >= CLASSIFY_TARGET_MIN_VALUE)
+    temp_mask_target = cv2.inRange(hsv_image_roi, np.array(
+        [CLASSIFY_TARGET_MIN_HUE, CLASSIFY_TARGET_MIN_SATURATION, CLASSIFY_TARGET_MIN_VALUE]),
+                                   np.array([CLASSIFY_TARGET_MAX_HUE, 255, 255]))
+    mask_target_pixels_in_roi = cv2.bitwise_and(temp_mask_target, temp_mask_target, mask=original_mask_roi)
+    target_pixel_count = cv2.countNonZero(mask_target_pixels_in_roi)
+    target_ratio = target_pixel_count / total_pixels_in_contour if total_pixels_in_contour > 0 else 0
 
-        if result:
-            logger.info(f"\nFinal Result: {result['predicted_class_vi']} ({result['confidence']:.2%})")
+    # --- THÊM PHÂN TÍCH MÀU GREEN-2 ---
+    is_green2_by_mean = (CLASSIFY_GREEN2_MIN_HUE <= hue_roi <= CLASSIFY_GREEN2_MAX_HUE and
+                         saturation_roi >= CLASSIFY_GREEN2_MIN_SATURATION and
+                         value_roi >= CLASSIFY_GREEN2_MIN_VALUE)
+    temp_mask_green2 = cv2.inRange(hsv_image_roi, np.array(
+        [CLASSIFY_GREEN2_MIN_HUE, CLASSIFY_GREEN2_MIN_SATURATION, CLASSIFY_GREEN2_MIN_VALUE]),
+                                   np.array([CLASSIFY_GREEN2_MAX_HUE, 255, 255]))
+    mask_green2_pixels_in_roi = cv2.bitwise_and(temp_mask_green2, temp_mask_green2, mask=original_mask_roi)
+    green2_pixel_count = cv2.countNonZero(mask_green2_pixels_in_roi)
+    green2_ratio = green2_pixel_count / total_pixels_in_contour if total_pixels_in_contour > 0 else 0
+    # ----------------------------------
 
-    except Exception as e:
-        logger.error(f"Error during inference: {str(e)}")
-        raise
+    logging.debug(f"    ROI Analysis - Mean HSV: H={hue_roi:.1f} S={saturation_roi:.1f} V={value_roi:.1f}")
+    logging.debug(f"      Red: is_mean_match={is_red_by_mean}, ratio={red_ratio:.2f}")
+    logging.debug(f"      Target: is_mean_match={is_target_by_mean}, ratio={target_ratio:.2f}")
+    logging.debug(f"      Green-2: is_mean_match={is_green2_by_mean}, ratio={green2_ratio:.2f}")  # Thêm log
+
+    # Logic quyết định màu chủ đạo (đơn giản hóa: ưu tiên màu có tỷ lệ cao nhất nếu đạt ngưỡng)
+    # Tạo danh sách các ứng viên màu
+    candidates = []
+    if is_red_by_mean:
+        candidates.append({"name": "red", "ratio": red_ratio})
+    if is_target_by_mean:
+        candidates.append({"name": "target_color", "ratio": target_ratio})
+    if is_green2_by_mean:  # Thêm green-2
+        candidates.append({"name": "green-2", "ratio": green2_ratio})
+
+    # Sắp xếp các ứng viên theo tỷ lệ giảm dần
+    candidates.sort(key=lambda x: x["ratio"], reverse=True)
+
+    # Kiểm tra ứng viên hàng đầu
+    if candidates and candidates[0]["ratio"] >= DOMINANT_PIXEL_RATIO_THRESHOLD:
+        logging.debug(f"    Decision: {candidates[0]['name']} (dominant with ratio {candidates[0]['ratio']:.2f})")
+        return candidates[0]["name"], hue_roi, saturation_roi, value_roi
+
+    # Nếu không có màu nào dominant, kiểm tra màu significant (ít chặt chẽ hơn)
+    # (Logic này có thể cần điều chỉnh thêm để tránh xung đột nếu nhiều màu significant)
+    if candidates:  # Kiểm tra theo thứ tự đã sắp xếp
+        for cand in candidates:
+            if cand["ratio"] >= SIGNIFICANT_PIXEL_RATIO_THRESHOLD:
+                logging.debug(
+                    f"    Decision: {cand['name']} (significant with ratio {cand['ratio']:.2f}, no clear dominant)")
+                return cand["name"], hue_roi, saturation_roi, value_roi
+
+    # Logic cũ (có thể giữ lại một phần nếu logic trên chưa đủ tốt, nhưng sẽ phức tạp)
+    # Cân nhắc: Logic cũ khá phức tạp để mở rộng cho 3+ màu. Logic mới ở trên đơn giản hơn.
+    # Nếu bạn muốn giữ logic cũ và mở rộng, bạn sẽ cần nhiều câu lệnh if/elif lồng nhau hơn.
+    # Ví dụ:
+    # if is_red_by_mean and red_ratio >= DOMINANT_PIXEL_RATIO_THRESHOLD:
+    #   is_target_also_strong = is_target_by_mean and target_ratio >= SIGNIFICANT_PIXEL_RATIO_THRESHOLD
+    #   is_green2_also_strong = is_green2_by_mean and green2_ratio >= SIGNIFICANT_PIXEL_RATIO_THRESHOLD
+    #   if is_target_also_strong and target_ratio > red_ratio * 0.8: # Nếu target cũng mạnh
+    #       pass # Bỏ qua, để target kiểm tra
+    #   elif is_green2_also_strong and green2_ratio > red_ratio * 0.8: # Nếu green2 cũng mạnh
+    #       pass # Bỏ qua, để green2 kiểm tra
+    #   else:
+    #       return "red", hue_roi, saturation_roi, value_roi
+    # ... và tương tự cho target_color và green-2, rất phức tạp.
+
+    logging.debug("    Decision: Unknown (final fallback)")
+    return "unknown", hue_roi, saturation_roi, value_roi
+
+
+def process_video_frame(frame):
+    if frame is None: return None, None
+
+    img = cv2.resize(frame, (640, 480), interpolation=cv2.INTER_AREA)
+    original_img_display = img.copy()
+
+    blur = cv2.medianBlur(img, MEDIAN_BLUR_KERNEL_SIZE)
+    hsv_image = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV)
+
+    mask_r1 = cv2.inRange(hsv_image, LOWER_RED_HSV1, UPPER_RED_HSV1)
+    mask_r2 = cv2.inRange(hsv_image, LOWER_RED_HSV2, UPPER_RED_HSV2)
+    mask_red_initial = cv2.bitwise_or(mask_r1, mask_r2)
+    mask_target_color_initial = cv2.inRange(hsv_image, LOWER_TARGET_COLOR_HSV, UPPER_TARGET_COLOR_HSV)
+
+    # --- THÊM MASK CHO GREEN-2 ---
+    mask_green2_initial = cv2.inRange(hsv_image, LOWER_GREEN2_HSV, UPPER_GREEN2_HSV)
+    # ----------------------------
+
+    # Kết hợp các mask lại
+    combined_mask_rg = cv2.bitwise_or(mask_red_initial, mask_target_color_initial)
+    combined_mask = cv2.bitwise_or(combined_mask_rg, mask_green2_initial)  # Thêm mask green-2
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (OPENING_KERNEL_SIZE, OPENING_KERNEL_SIZE))
+    opened_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel, iterations=OPENING_ITERATIONS)
+    dilated_mask = cv2.dilate(opened_mask, None, iterations=DILATE_ITERATIONS_AFTER_OPENING)
+
+    contours, _ = cv2.findContours(dilated_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    valid_contours_data = []
+
+    if contours:
+        for i, cnt in enumerate(contours):
+            area = cv2.contourArea(cnt)
+            if area < MIN_CONTOUR_AREA: continue
+            x_b, y_b, w_b, h_b = cv2.boundingRect(cnt)
+            if w_b == 0 or h_b == 0: continue
+            aspect_ratio = float(w_b) / h_b
+            if not (MIN_ASPECT_RATIO <= aspect_ratio <= MAX_ASPECT_RATIO): continue
+            rect_area = w_b * h_b
+            extent = float(area) / rect_area if rect_area > 0 else 0
+            if extent < MIN_EXTENT: continue
+            hull = cv2.convexHull(cnt)
+            hull_area = cv2.contourArea(hull)
+            solidity = float(area) / hull_area if hull_area > 0 else 0
+            if solidity < MIN_SOLIDITY: continue
+            perimeter = cv2.arcLength(cnt, True)
+            circularity = 4 * np.pi * (area / (perimeter * perimeter)) if perimeter > 0 else 0
+            if circularity < MIN_CIRCULARITY_RELAXED: continue
+
+            logging.debug(f"Contour {i} PASSED SHAPE. Area:{area:.0f}, AR:{aspect_ratio:.2f}")
+            (x_mc, y_mc), radius_mc = cv2.minEnclosingCircle(cnt)
+            center_2d_mc = (int(x_mc), int(y_mc))
+            radius_px_mc = int(radius_mc)
+            detected_color_type = "generic_shape"  # Mặc định
+
+            if ENABLE_POST_FILTER_COLOR_CLASSIFICATION:
+                contour_roi_mask = np.zeros(dilated_mask.shape, dtype="uint8")
+                cv2.drawContours(contour_roi_mask, [cnt], -1, 255, -1)
+                if cv2.countNonZero(contour_roi_mask) == 0:
+                    logging.debug(f"  Contour {i} has zero pixels in ROI mask, skipping color classification.")
+                    continue
+                hsv_image_roi_pixels = cv2.bitwise_and(hsv_image, hsv_image, mask=contour_roi_mask)
+                # Hàm get_dominant_color_in_roi đã được cập nhật
+                detected_color_type, _, _, _ = get_dominant_color_in_roi(hsv_image_roi_pixels, contour_roi_mask)
+                logging.debug(f"  Contour {i} CLASSIFIED as {detected_color_type}")
+
+            if detected_color_type != "unknown" and detected_color_type != "generic_shape":
+                valid_contours_data.append({
+                    'contour': cnt, 'area': area, 'center_2d': center_2d_mc,
+                    'radius_px': radius_px_mc, 'type': detected_color_type
+                })
+            else:
+                logging.debug(f"  Contour {i} resulted in UNKNOWN/GENERIC post-classification, not added.")
+
+    detected_objects_final = []
+    if valid_contours_data:
+        if ONLY_DETECT_LARGEST_CONTOUR:
+            valid_contours_data.sort(key=lambda x: x['area'], reverse=True)
+            if valid_contours_data: detected_objects_final.append(valid_contours_data[0])
+        else:
+            detected_objects_final = valid_contours_data
+
+        for data in detected_objects_final:
+            center_2d = data['center_2d']
+            radius_px = data['radius_px']
+            obj_type = data['type']
+
+            draw_color = (128, 128, 128)  # Xám cho unknown/generic
+            color_code_to_send = 0
+            display_name = "Unknown"
+
+            if obj_type == "red":
+                draw_color = (0, 0, 255)  # Đỏ (BGR)
+                color_code_to_send = 2
+                display_name = "Do (2)"
+            elif obj_type == "target_color":
+                draw_color = (0, 255, 255)  # Vàng (BGR)
+                color_code_to_send = 1
+                display_name = "Xanh/Vang (1)"
+            # --- THÊM XỬ LÝ CHO GREEN-2 ---
+            elif obj_type == "green-2":
+                draw_color = (0, 255, 0)  # Xanh lá cây (BGR)
+                color_code_to_send = 3  # Mã UART là 3
+                display_name = "Xanh-2 (3)"  # Tên hiển thị
+            # --------------------------------
+
+            cv2.circle(original_img_display, center_2d, radius_px, draw_color, 2)
+            cv2.circle(original_img_display, center_2d, 3, (255, 0, 0), -1)
+
+            info_text = f"{display_name} R:{radius_px}"
+            cv2.putText(original_img_display, info_text,
+                        (center_2d[0] - radius_px, center_2d[1] - radius_px - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, draw_color, 2)
+
+            if USE_UART:
+                send_object_data_uart(color_code_to_send, center_2d[0], center_2d[1], radius_px)
+
+    if not detected_objects_final and USE_UART:
+        send_object_data_uart(0, 0, 0, 0)
+
+    return detected_objects_final, original_img_display
+
+
+def run_camera_detection(camera_id=0, target_fps=10, max_retries=3):
+    global ser_instance_global
+    retry_count = 0
+
+    if USE_UART: init_uart_if_needed()
+
+    while retry_count <= max_retries:
+        cap = cv2.VideoCapture(camera_id)
+        if not cap.isOpened():
+            logging.error(f"Không thể mở camera {camera_id}")
+            retry_count += 1
+            if retry_count <= max_retries:
+                logging.info(f"Thử lại sau 5s... ({retry_count}/{max_retries})")
+                time.sleep(5)
+                continue
+            else:
+                logging.error("Vượt quá số lần thử lại camera.")
+                return
+
+        logging.info(f"Bắt đầu nhận diện từ camera {camera_id}. Nhấn 'q' để thoát.")
+        frame_count_interval = 0
+        start_time_fps_calc = time.time()
+        consecutive_read_errors = 0
+        max_consecutive_read_errors = 30
+
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                consecutive_read_errors += 1
+                logging.warning(f"Không đọc được frame (Lỗi liên tiếp: {consecutive_read_errors})")
+                if consecutive_read_errors >= max_consecutive_read_errors:
+                    logging.error("Quá nhiều lỗi đọc frame, reset camera.")
+                    break
+                time.sleep(0.05)
+                continue
+            consecutive_read_errors = 0
+
+            try:
+                results, result_image = process_video_frame(frame)
+
+                if result_image is not None and SHOW_FINAL_RESULT_IMAGE_ONLY:
+                    cv2.imshow("Object Detection", result_image)
+
+                frame_count_interval += 1
+                if frame_count_interval >= target_fps * 2:  # Log FPS mỗi 2s
+                    elapsed_time = time.time() - start_time_fps_calc
+                    if elapsed_time > 0:
+                        current_fps_val = frame_count_interval / elapsed_time
+                        logging.info(
+                            f"FPS (ước lượng): {current_fps_val:.1f} ({frame_count_interval} frames / {elapsed_time:.2f}s)")
+                    frame_count_interval = 0
+                    start_time_fps_calc = time.time()
+
+            except Exception as e:
+                logging.error(f"Lỗi xử lý frame: {e}", exc_info=True)
+
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
+                logging.info("Người dùng thoát.")
+                if cap.isOpened(): cap.release()
+                if USE_UART and ser_instance_global and ser_instance_global.is_open: ser_instance_global.close()
+                cv2.destroyAllWindows()
+                return
+            elif key == ord('s') and result_image is not None:
+                fname = f"capture_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.png"
+                cv2.imwrite(fname, result_image)
+                logging.info(f"Đã lưu ảnh: {fname}")
+
+        if cap.isOpened(): cap.release()
+        retry_count += 1
+        if retry_count <= max_retries:
+            logging.info(f"Reset camera. Thử lại {retry_count}/{max_retries}")
+            time.sleep(2)
+        else:
+            logging.error("Vượt quá số lần thử lại camera.")
+
+    if USE_UART and ser_instance_global and ser_instance_global.is_open: ser_instance_global.close()
+    cv2.destroyAllWindows()
+    logging.info("Kết thúc chương trình.")
 
 
 if __name__ == "__main__":
-    main()
+    logging.info("Khởi chạy chương trình phát hiện đối tượng.")
+    # Để debug chi tiết, đổi logging.INFO ở đầu thành logging.DEBUG
+    # logging.getLogger().setLevel(logging.DEBUG) # Hoặc dùng dòng này
+
+    run_camera_detection(camera_id=0, target_fps=10, max_retries=3)
